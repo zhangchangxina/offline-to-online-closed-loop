@@ -7,6 +7,7 @@ import jax
 import jax.numpy as jnp
 import optax
 from flax import struct
+from flax.core.frozen_dict import FrozenDict, unfreeze
 
 from wsrl.common.typing import Params, PRNGKey
 
@@ -223,14 +224,22 @@ class JaxRLTrainState(struct.PyTreeNode):
             grad_norm = optax.global_norm(grads)
             param_norm = optax.global_norm(self.params)
             update_norm = optax.global_norm(updates)
-            aux.update(
+            # Ensure aux is a mutable dict before updating
+            if isinstance(aux, FrozenDict):
+                aux_mut = unfreeze(aux)
+            else:
+                try:
+                    aux_mut = dict(aux)
+                except Exception:
+                    aux_mut = {"aux": aux}
+            aux_mut.update(
                 {
                     "grad_norm": grad_norm,
                     "param_norm": param_norm,
                     "update_norm": update_norm,
                 }
             )
-            return new_train_state, aux
+            return new_train_state, aux_mut
         else:
             return self.apply_gradients(grads=grads_and_aux)[0]
 

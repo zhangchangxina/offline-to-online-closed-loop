@@ -6,6 +6,7 @@ import jax
 import numpy as np
 import tqdm
 from absl import app, flags, logging
+from flax.core.frozen_dict import freeze, unfreeze
 from flax.training import checkpoints
 from ml_collections import config_flags
 
@@ -57,6 +58,11 @@ flags.DEFINE_bool(
 )
 flags.DEFINE_integer(
     "warmup_steps", 0, "number of warmup steps (WSRL) before performing online updates"
+)
+flags.DEFINE_bool(
+    "warmup_update_critic",
+    False,
+    "If true, perform critic-only updates during warmup (after enough online data).",
 )
 
 # agent
@@ -216,7 +222,64 @@ def main(_):
 
     if FLAGS.resume_path != "":
         assert os.path.exists(FLAGS.resume_path), "resume path does not exist"
-        agent = checkpoints.restore_checkpoint(FLAGS.resume_path, target=agent)
+        try:
+            agent = checkpoints.restore_checkpoint(FLAGS.resume_path, target=agent)
+        except Exception as e:
+            logging.warning(
+                "Standard restore failed (%s). Falling back to partial restore for backward compatibility.",
+                repr(e),
+            )
+            # Load raw checkpoint without enforcing exact structure
+            ckpt_obj = checkpoints.restore_checkpoint(FLAGS.resume_path, target=None)
+
+            # Extract state (supports both saved agent objects or raw state dicts)
+            ckpt_state = getattr(ckpt_obj, "state", ckpt_obj)
+
+            def merge_params_like(target_params, source_params):
+                tgt = unfreeze(target_params)
+                try:
+                    src = unfreeze(source_params)
+                except Exception:
+                    src = source_params
+
+                def _merge(a, b):
+                    if isinstance(a, dict) and isinstance(b, dict):
+                        out = {}
+                        for k, v in a.items():
+                            if k in b:
+                                out[k] = _merge(v, b[k])
+                            else:
+                                out[k] = v
+                        return out
+                    # leaf: prefer source if shape compatible
+                    try:
+                        if hasattr(a, "shape") and hasattr(b, "shape") and a.shape == b.shape:
+                            return b
+                    except Exception:
+                        pass
+                    return a
+
+                merged = _merge(tgt, src if isinstance(src, dict) else {})
+                return freeze(merged)
+
+            # Safely merge params and target_params; keep current opt_states/txs
+            merged_params = merge_params_like(agent.state.params, getattr(ckpt_state, "params", {}))
+            merged_target_params = merge_params_like(
+                agent.state.target_params, getattr(ckpt_state, "target_params", {})
+            )
+
+            # Step and rng if present
+            new_step = getattr(ckpt_state, "step", agent.state.step)
+            new_rng = getattr(ckpt_state, "rng", agent.state.rng)
+
+            agent = agent.replace(
+                state=agent.state.replace(
+                    params=merged_params,
+                    target_params=merged_target_params,
+                    step=new_step,
+                    rng=new_rng,
+                )
+            )
 
     """
     eval function
@@ -304,6 +367,38 @@ def main(_):
                         "lam_eff_linear_start_step": int(agent.state.step)
                     })
 
+            # If using SAC-BC, optionally enable BC only for first N online steps
+            if FLAGS.agent == "sac_bc":
+                online_bc_steps = int(FLAGS.config.agent_kwargs.get("bc_online_enable_for_steps", -1))
+                if online_bc_steps and online_bc_steps > 0:
+                    agent.update_config({
+                        "bc_online_start_step": int(agent.state.step),
+                        "bc_online_enable_for_steps": online_bc_steps,
+                    })
+
+                # Optionally load an offline checkpoint as the fixed BC teacher
+                # Support unified bc_target: if it's a path (not a known keyword), use it as teacher
+                target_cfg = FLAGS.config.agent_kwargs.get("bc_target", "")
+                if isinstance(target_cfg, str) and target_cfg not in ("dataset", "actor_target", "offline_checkpoint") and len(target_cfg) > 0:
+                    FLAGS.config.agent_kwargs["bc_offline_ckpt_teacher"] = target_cfg
+                    FLAGS.config.agent_kwargs["bc_teacher_source"] = "offline_checkpoint"
+                ckpt_teacher_path = FLAGS.config.agent_kwargs.get("bc_offline_ckpt_teacher", "")
+                if ckpt_teacher_path:
+                    try:
+                        ckpt_obj = checkpoints.restore_checkpoint(ckpt_teacher_path, target=None)
+                        ckpt_state = getattr(ckpt_obj, "state", ckpt_obj)
+                        teacher_params = getattr(ckpt_state, "target_params", None) or getattr(ckpt_state, "params", None)
+                        if teacher_params is not None:
+                            from wsrl.agents.sac_bc import SACBCWithTargetAgent  # local import to avoid cycles
+                            assert isinstance(agent, SACBCWithTargetAgent) or hasattr(agent, "set_offline_teacher_params")
+                            agent = agent.set_offline_teacher_params(teacher_params)
+                            agent.update_config({"bc_teacher_source": "offline_checkpoint"})
+                            logging.info("Loaded offline checkpoint teacher from %s", ckpt_teacher_path)
+                        else:
+                            logging.warning("Checkpoint at %s did not contain params/target_params; skipping offline teacher.", ckpt_teacher_path)
+                    except Exception as e:
+                        logging.warning("Failed to load offline teacher from %s: %s", ckpt_teacher_path, repr(e))
+
         timer.tick("total")
 
         """
@@ -313,6 +408,17 @@ def main(_):
             if is_online_stage:
                 rng, action_rng = jax.random.split(rng)
                 action = agent.sample_actions(observation, seed=action_rng)
+                # Guard against NaNs/Infs and enforce clip range before env step
+                action = jax.device_get(action)
+                action = np.asarray(action, dtype=np.float32)
+                action = np.nan_to_num(
+                    action,
+                    nan=0.0,
+                    posinf=FLAGS.clip_action,
+                    neginf=-FLAGS.clip_action,
+                )
+                if FLAGS.clip_action is not None:
+                    action = np.clip(action, -FLAGS.clip_action, FLAGS.clip_action)
                 next_observation, reward, done, truncated, info = finetune_env.step(
                     action
                 )
@@ -348,8 +454,32 @@ def main(_):
                 if step - FLAGS.num_offline_steps <= max(
                     FLAGS.warmup_steps, min_steps_to_update
                 ):
-                    # no updates during warmup
-                    pass
+                    # Warmup phase: optionally update critic only if enough online data
+                    if FLAGS.warmup_update_critic and len(replay_buffer) >= min_steps_to_update:
+                        if FLAGS.online_sampling_method == "mixed":
+                            # batch from a mixing ratio of offline and online data
+                            batch_size_offline = int(
+                                FLAGS.batch_size * FLAGS.offline_data_ratio
+                            )
+                            batch_size_online = FLAGS.batch_size - batch_size_offline
+                            online_batch = replay_buffer.sample(batch_size_online)
+                            offline_batch = subsample_batch(dataset, batch_size_offline)
+                            # update with the combined batch
+                            batch = concatenate_batches([online_batch, offline_batch])
+                        elif FLAGS.online_sampling_method == "append":
+                            # batch from online replay buffer, with is initialized with offline data
+                            batch = replay_buffer.sample(FLAGS.batch_size)
+                        else:
+                            raise RuntimeError("Incorrect online sampling method")
+
+                        # critic-only update (single step, no UTD to keep warmup simple)
+                        agent, update_info = agent.update(
+                            batch,
+                            networks_to_update=frozenset({"critic"}),
+                        )
+                    else:
+                        # no updates during warmup
+                        pass
                 else:
                     # do online updates, gather batch
                     if FLAGS.online_sampling_method == "mixed":

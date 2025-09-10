@@ -102,7 +102,7 @@ def get_config(config_string):
                         align_constraint=0.1,
                         lam_align=1.0,
                         lambda_schedule="linear", # fixed | linear | adaptive
-                        lam_eff_linear_steps=10000,
+                        align_steps=10000,
                     )
                 ).to_dict(),
             )
@@ -203,7 +203,7 @@ def get_config(config_string):
                         align_constraint=0.1,
                         lam_align=1.0,
                         lambda_schedule="linear", # fixed | linear | adaptive
-                        lam_eff_linear_steps=10000,
+                        align_steps=10000,
                     )
                 ).to_dict(),
             )
@@ -302,7 +302,7 @@ def get_config(config_string):
                         align_constraint=0.1,
                         lam_align=1.0,
                         lambda_schedule="linear", # fixed | linear | adaptive
-                        lam_eff_linear_steps=10000,
+                        align_steps=10000,
                     )
                 ).to_dict(),
             )
@@ -385,7 +385,7 @@ def get_config(config_string):
                         align_constraint=0.1,
                         lam_align=1.0,
                         lambda_schedule="linear", # fixed | linear | adaptive
-                        lam_eff_linear_steps=10000,
+                        align_steps=10000,
                     )
                 ).to_dict(),
             )

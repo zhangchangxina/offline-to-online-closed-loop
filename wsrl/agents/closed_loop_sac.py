@@ -12,6 +12,7 @@ import flax
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
+import optax
 from ml_collections import ConfigDict
 
 from wsrl.agents.sac import SACAgent
@@ -45,24 +46,32 @@ class ClosedLoopSACAgent(SACAgent):
         This implements the constraint E[q_delta^2] <= c where q_delta = r + γQ(s',a') - Q(s,a)
         """
         batch_size = batch["rewards"].shape[0]
-        rng, next_action_sample_key = jax.random.split(rng)
+        rng, next_action_sample_key, q_now_rng, q_next_rng = jax.random.split(rng, 4)
         
         # Get current Q values
         qs_now = self.forward_critic(
             batch["observations"],
             batch["actions"],
-            rng=rng,
+            rng=q_now_rng,
         )
         q_now = qs_now.min(axis=0)
         
         # Get next Q values with target network
-        next_actions, next_actions_log_probs = self._compute_next_actions(
-            batch, next_action_sample_key
+        # Sample next actions with current actor params to enable gradients to the actor
+        sample_n_actions = (
+            self.config["n_actions"] if self.config["max_target_backup"] else None
+        )
+        next_actions, next_actions_log_probs = self.forward_policy_and_sample(
+            batch["next_observations"],
+            next_action_sample_key,
+            grad_params=grad_params,
+            repeat=sample_n_actions,
         )
         qs_next = self.forward_target_critic(
+        # qs_next = self.forward_critic(
             batch["next_observations"],
             next_actions,
-            rng=rng,
+            rng=q_next_rng,
         )
         q_next_min = qs_next.min(axis=0)
         # Ensure target next Qs shape matches policy sampling setup
@@ -71,6 +80,8 @@ class ClosedLoopSACAgent(SACAgent):
         q_next_min = self._process_target_next_qs(
             q_next_min, next_actions_log_probs
         )
+        # Do not propagate gradients through q_next_min in align_loss
+        q_next_min = jax.lax.stop_gradient(q_next_min)
         reward_term = batch["rewards"]
         
         # Compute Q delta (mask terminals)
@@ -89,7 +100,7 @@ class ClosedLoopSACAgent(SACAgent):
         batch_size = batch["rewards"].shape[0]
         temperature = self.forward_temperature()
 
-        rng, policy_rng, sample_rng, critic_rng, align_rng = jax.random.split(rng, 5)
+        rng, policy_rng, sample_rng, critic_pred_rng, critic_new_rng, align_rng = jax.random.split(rng, 6)
         
         # Standard SAC policy components
         action_distributions = self.forward_policy(
@@ -102,7 +113,7 @@ class ClosedLoopSACAgent(SACAgent):
         predicted_qs = self.forward_critic(
             batch["observations"],
             actions,
-            rng=critic_rng,
+            rng=critic_pred_rng,
         )
         predicted_q = predicted_qs.min(axis=0)
         chex.assert_shape(predicted_q, (batch_size,))
@@ -142,46 +153,85 @@ class ClosedLoopSACAgent(SACAgent):
             return standard_actor_loss, info
 
         # Closed-loop update mechanism
-        # Compute alignment loss
-        align_loss, q_delta = self._compute_align_loss(batch, align_rng, params)
-        
+        # Choose between two policy loss variants: 'align' (default) or 'q_trust'
+        loss_variant = self.config.get("policy_loss_variant", "align")
+        loss_variant_code = jnp.asarray(0 if loss_variant == "align" else 1, dtype=jnp.int32)
+        # Will compute TD error (q_delta) only when needed:
+        # - Always for 'align' variant
+        # - For 'q_trust' variant only before align_steps
         # Get current Q values for the new policy
         qs_new = self.forward_critic(
             batch["observations"],
             actions,
-            rng=critic_rng,
+            rng=critic_new_rng,
         )
         q_new = qs_new.min(axis=0)
-        q_term = (-q_new).mean()
-        entropy_term = (temperature * log_probs).mean()
-
-        # Compute lam_align with schedule: fixed | linear | adaptive
-        lam_align_init = jnp.asarray(self.config.get("lam_align", 1.0), dtype=jnp.float32)
-
-        schedule = self.config.get("lambda_schedule", "fixed")
-        # Precompute debug helpers for logging
-        steps = self.config.get("lam_eff_linear_steps", 100000)
+        # TD-based trust for Q term (variant: 'q_trust'): larger |q_delta| => smaller trust
+        q_term_unweighted = (-q_new).mean()
+        # Apply q_trust only before align_steps (optionally offset by lam_eff_linear_start_step)
+        steps = self.config.get("align_steps", 100000)
         start = self.config.get("lam_eff_linear_start_step", 0)
         eff_step = jnp.maximum(self.state.step - start, 0)
-        progress = jnp.minimum(eff_step, steps) / jnp.maximum(steps, 1)
+        use_q_trust_flag = jnp.asarray(1 if loss_variant == "q_trust" else 0, dtype=jnp.int32)
+        is_align_flag = jnp.asarray(1 if loss_variant == "align" else 0, dtype=jnp.int32)
 
-        if schedule == "linear":
-            schedule_code = jnp.asarray(1, dtype=jnp.int32)
-            lam_align = jnp.maximum(0.0, lam_align_init * (1.0 - progress))
-        elif schedule == "adaptive":
-            schedule_code = jnp.asarray(2, dtype=jnp.int32)
-            lam_align = jnp.maximum(0.0, self.forward_align_lagrange())
+        def _compute_td_fn(_):
+            return self._compute_align_loss(batch, align_rng, params)
+
+        def _skip_td_fn(_):
+            return jnp.asarray(0.0, dtype=jnp.float32), jnp.zeros_like(q_new)
+
+        need_td = jnp.logical_or(is_align_flag == 1, jnp.logical_and(use_q_trust_flag == 1, eff_step < steps))
+        align_loss, q_delta = jax.lax.cond(need_td, _compute_td_fn, _skip_td_fn, operand=None)
+
+        def _q_term_with_trust(_):
+            q_trust_beta = jnp.asarray(self.config.get("q_trust_beta", 1.0), dtype=jnp.float32)
+            weight = 1.0 / (1.0 + q_trust_beta * (q_delta ** 2))
+            weight = jax.lax.stop_gradient(weight)
+            return (-(weight * q_new)).mean(), weight
+
+        def _q_term_without_trust(_):
+            return q_term_unweighted, jnp.ones_like(q_new)
+
+        cond = jnp.logical_and(use_q_trust_flag == 1, eff_step < steps)
+        q_term, q_trust_weight = jax.lax.cond(cond, _q_term_with_trust, _q_term_without_trust, operand=None)
+        entropy_term = (temperature * log_probs).mean()
+
+        # Compute lam_align with schedule: fixed | linear | adaptive (only used in 'align' variant)
+        if loss_variant == "align":
+            lam_align_init = jnp.asarray(self.config.get("lam_align", 1.0), dtype=jnp.float32)
+            schedule = self.config.get("lambda_schedule", "fixed")
+            # Precompute debug helpers for logging
+            steps = self.config.get("align_steps", 100000)
+            start = self.config.get("lam_eff_linear_start_step", 0)
+            eff_step = jnp.maximum(self.state.step - start, 0)
+            progress = jnp.minimum(eff_step, steps) / jnp.maximum(steps, 1)
+
+            if schedule == "linear":
+                schedule_code = jnp.asarray(1, dtype=jnp.int32)
+                lam_align = jnp.maximum(0.0, lam_align_init * (1.0 - progress))
+            elif schedule == "adaptive":
+                schedule_code = jnp.asarray(2, dtype=jnp.int32)
+                lam_align = jnp.maximum(0.0, self.forward_align_lagrange())
+            else:
+                schedule_code = jnp.asarray(0, dtype=jnp.int32)
+                lam_align = jnp.maximum(0.0, lam_align_init)
         else:
-            schedule_code = jnp.asarray(0, dtype=jnp.int32)
-            lam_align = jnp.maximum(0.0, lam_align_init)
+            lam_align = jnp.asarray(0.0, dtype=jnp.float32)
+            schedule_code = jnp.asarray(3, dtype=jnp.int32)  # disabled in q_trust variant
 
-        # Final objective: q_term + lam_align * align_loss + entropy_term
-        policy_loss = q_term + lam_align * align_loss + entropy_term
+        # Final objective per variant
+        if loss_variant == "align":
+            policy_loss =  q_term + lam_align * align_loss + entropy_term
+        else:
+            policy_loss =  q_term + entropy_term
+        
 
         info = {
             "actor_loss": policy_loss,
             "actor_nll": nll_objective,
             "temperature": temperature,
+            "target_entropy": self.config["target_entropy"],
             "entropy": -log_probs.mean(),
             "log_probs": log_probs,
             "actions_mse": ((actions - batch["actions"]) ** 2).sum(axis=-1).mean(),
@@ -195,7 +245,107 @@ class ClosedLoopSACAgent(SACAgent):
             "q_term": q_term,
             "entropy_term": entropy_term,
             "lam_align": lam_align,
+            "lambda_schedule_code": schedule_code,
+            "policy_loss_variant_code": loss_variant_code,
         }
+        if loss_variant == "q_trust":
+            info.update({
+                "q_term_unweighted": q_term_unweighted,
+                "q_trust_weight_mean": jnp.mean(q_trust_weight),
+                "q_trust_weight_min": jnp.min(q_trust_weight),
+                "q_trust_weight_max": jnp.max(q_trust_weight),
+            })
+
+        # Optional: per-term gradient norms for actor (and log_std head)
+        if self.config.get("log_actor_grad_terms", False):
+            log_std_layer_name = self.config.get("actor_log_std_layer_name", "Dense_1")
+
+            def q_term_only_fn(p):
+                # Recompute actions and q_new with same RNGs
+                dist = self.forward_policy(batch["observations"], rng=policy_rng, grad_params=p)
+                a, _ = dist.sample_and_log_prob(seed=sample_rng)
+                qs_new_local = self.forward_critic(batch["observations"], a, rng=critic_new_rng)
+                q_new_local = qs_new_local.min(axis=0)
+
+                if (self.config.get("policy_loss_variant", "align") == "q_trust") and (eff_step < steps):
+                    # Trust-weighted q-term
+                    # Reuse q_delta computation with same RNGs
+                    sample_n_actions = (
+                        self.config["n_actions"] if self.config["max_target_backup"] else None
+                    )
+                    next_actions, next_actions_log_probs = self.forward_policy_and_sample(
+                        batch["next_observations"], align_rng, grad_params=p, repeat=sample_n_actions,
+                    )
+                    qs_next_local = self.forward_target_critic(
+                        batch["next_observations"], next_actions, rng=critic_new_rng,
+                    )
+                    q_next_min_local = qs_next_local.min(axis=0)
+                    chex.assert_equal_shape([q_next_min_local, next_actions_log_probs])
+                    q_next_min_local = self._process_target_next_qs(q_next_min_local, next_actions_log_probs)
+                    q_now_local = self.forward_critic(batch["observations"], batch["actions"], rng=critic_new_rng).min(axis=0)
+                    q_delta_local = batch["rewards"] + self.config["discount"] * batch["masks"] * q_next_min_local - q_now_local
+                    q_trust_beta = jnp.asarray(self.config.get("q_trust_beta", 1.0), dtype=jnp.float32)
+                    weight_local = 1.0 / (1.0 + q_trust_beta * (q_delta_local ** 2))
+                    weight_local = jax.lax.stop_gradient(weight_local)
+                    return (-(weight_local * q_new_local)).mean()
+                else:
+                    # Unweighted q-term
+                    return (-(q_new_local)).mean()
+
+            def entropy_term_only_fn(p):
+                dist = self.forward_policy(batch["observations"], rng=policy_rng, grad_params=p)
+                _, lp = dist.sample_and_log_prob(seed=sample_rng)
+                return (temperature * lp).mean()
+
+            def align_term_only_fn(p):
+                # Only relevant if loss_variant == 'align'
+                if self.config.get("policy_loss_variant", "align") != "align":
+                    return jnp.asarray(0.0, dtype=jnp.float32)
+                align_loss_local, _ = self._compute_align_loss(batch, align_rng, p)
+                # Use current lam_align as constant weight
+                lam_local = jnp.maximum(0.0, (
+                    self.forward_align_lagrange(grad_params=p) if self.config.get("lambda_schedule", "fixed") == "adaptive" else lam_align
+                ))
+                lam_local = jax.lax.stop_gradient(lam_local)
+                return (lam_local * align_loss_local)
+
+            g_q_full = jax.grad(q_term_only_fn)(params)
+            g_ent_full = jax.grad(entropy_term_only_fn)(params)
+            g_align_full = jax.grad(align_term_only_fn)(params)
+
+            g_q_actor = g_q_full.get("actor", {})
+            g_ent_actor = g_ent_full.get("actor", {})
+            g_align_actor = g_align_full.get("actor", {})
+
+            info["actor_grad_norm_q"] = optax.global_norm(g_q_actor)
+            info["actor_grad_norm_entropy"] = optax.global_norm(g_ent_actor)
+            info["actor_grad_norm_align"] = optax.global_norm(g_align_actor)
+
+            try:
+                g_q_logstd = g_q_actor.get(log_std_layer_name, None)
+                g_ent_logstd = g_ent_actor.get(log_std_layer_name, None)
+                g_align_logstd = g_align_actor.get(log_std_layer_name, None)
+                info["actor_grad_norm_q_log_std"] = (
+                    optax.global_norm(g_q_logstd) if g_q_logstd is not None else jnp.array(0.0, jnp.float32)
+                )
+                info["actor_grad_norm_entropy_log_std"] = (
+                    optax.global_norm(g_ent_logstd) if g_ent_logstd is not None else jnp.array(0.0, jnp.float32)
+                )
+                info["actor_grad_norm_align_log_std"] = (
+                    optax.global_norm(g_align_logstd) if g_align_logstd is not None else jnp.array(0.0, jnp.float32)
+                )
+            except Exception:
+                info["actor_grad_norm_q_log_std"] = jnp.array(0.0, jnp.float32)
+                info["actor_grad_norm_entropy_log_std"] = jnp.array(0.0, jnp.float32)
+                info["actor_grad_norm_align_log_std"] = jnp.array(0.0, jnp.float32)
+
+            # Also log ||dQ/da|| as diagnostic
+            def q_min_mean_fn(a):
+                qs_local = self.forward_critic(batch["observations"], a, rng=critic_pred_rng)
+                return qs_local.min(axis=0).mean()
+
+            dq_da = jax.grad(q_min_mean_fn)(actions)
+            info["dq_da_l2_mean"] = jnp.linalg.norm(dq_da, axis=-1).mean()
 
         # Optionally add BC regularization
         if self.config.get("bc_loss_weight", 0.0) > 0:
@@ -237,16 +387,34 @@ class ClosedLoopSACAgent(SACAgent):
             name="align_lagrange",
         )
 
-        return align_penalty, {"align_lagrange_loss": align_penalty}
+        # KKT diagnostics
+        lambda_value = self.forward_align_lagrange(grad_params=params)
+        complementarity = lambda_value * positive_violation
+
+        info = {
+            "align_lagrange_loss": align_penalty,
+            "align_constraint_lhs": align_loss,
+            "align_constraint_rhs": align_constraint,
+            "align_violation": constraint_violation,
+            "align_positive_violation": positive_violation,
+            "align_lambda": lambda_value,
+            "align_lambda_times_violation": complementarity,
+            "align_kkt_residual": jnp.abs(complementarity),
+        }
+
+        return align_penalty, info
 
     def loss_fns(self, batch):
         """Override to include alignment loss and its multiplier."""
-        return {
+        loss_map = {
             "critic": partial(self.critic_loss_fn, batch),
             "actor": partial(self.policy_loss_fn, batch),
             "temperature": partial(self.temperature_loss_fn, batch),
-            "align_lagrange": partial(self.align_lagrange_loss_fn, batch),
         }
+        # Only expose align_lagrange loss when module exists (adaptive schedule)
+        if self.config.get("lambda_schedule", "fixed") == "adaptive":
+            loss_map["align_lagrange"] = partial(self.align_lagrange_loss_fn, batch)
+        return loss_map
 
     @partial(jax.jit, static_argnames=("pmap_axis", "networks_to_update"))
     def update(
@@ -264,16 +432,17 @@ class ClosedLoopSACAgent(SACAgent):
         batch_size = batch["rewards"].shape[0]
         chex.assert_tree_shape_prefix(batch, (batch_size,))
 
-        rng, key = jax.random.split(self.state.rng)
+        rng, _ = jax.random.split(self.state.rng)
 
         # Compute gradients and update params
         loss_fns = self.loss_fns(batch)
 
         # Only compute gradients for specified steps
-        assert networks_to_update.issubset(
-            loss_fns.keys()
-        ), f"Invalid gradient steps: {networks_to_update}"
-        for key in loss_fns.keys() - networks_to_update:
+        # Filter out steps that are not available (e.g., align_lagrange when module is absent)
+        available_steps = frozenset(loss_fns.keys())
+        requested_steps = networks_to_update
+        filtered_steps = requested_steps & available_steps
+        for key in loss_fns.keys() - filtered_steps:
             loss_fns[key] = lambda params, rng: (0.0, {})
 
         new_state, info = self.state.apply_loss_fns(
@@ -333,17 +502,20 @@ class ClosedLoopSACAgent(SACAgent):
         (agent,), critic_infos = jax.lax.scan(scan_body, (self,), (minibatches,))
 
         critic_infos = jax.tree_util.tree_map(lambda x: jnp.mean(x, axis=0), critic_infos)
-        del critic_infos["actor"]
-        del critic_infos["temperature"]
-        del critic_infos["align_lagrange"]
+        critic_infos.pop("actor", None)
+        critic_infos.pop("temperature", None)
+        critic_infos.pop("align_lagrange", None)
 
-        # One step for actor, temperature, and align_lagrange
+        # One step for actor, temperature, and optionally align_lagrange (if present)
+        requested = {"actor", "temperature", "align_lagrange"}
+        available = set(agent.loss_fns(batch).keys())
+        to_update = frozenset(requested & available)
         agent, actor_temp_infos = agent.update(
             batch,
             pmap_axis=pmap_axis,
-            networks_to_update=frozenset({"actor", "temperature", "align_lagrange"}),
+            networks_to_update=to_update,
         )
-        del actor_temp_infos["critic"]
+        actor_temp_infos.pop("critic", None)
 
         infos = {**critic_infos, **actor_temp_infos}
 
@@ -377,7 +549,7 @@ class ClosedLoopSACAgent(SACAgent):
         # Deprecated fields (kept for backward-compat in configs):
         lambda_sac: float = 1.0,
         lam_eff_linear: bool = False,
-        lam_eff_linear_steps: int = 100000,
+        align_steps: int = 100000,
         # Adaptive align Lagrange options
         adaptive_align: bool = False,
         # align_lagrange_init removed; initialized from lam_align
@@ -429,22 +601,24 @@ class ClosedLoopSACAgent(SACAgent):
             name="temperature",
         )
 
-        # New: align lagrange multiplier (scalar)
-        # Use lam_align as init for adaptive mode if not provided
-        align_lagrange_def = LeqLagrangeMultiplier(
-            init_value=lam_align,
-            constraint_shape=(),
-            constraint_type="leq",
-            name="align_lagrange",
-        )
+        # Only create align_lagrange module if lambda_schedule is adaptive
+        need_align_module = kwargs.get("lambda_schedule", "fixed") == "adaptive"
+        if need_align_module:
+            align_lagrange_def = LeqLagrangeMultiplier(
+                init_value=lam_align,
+                constraint_shape=(),
+                constraint_type="leq",
+                name="align_lagrange",
+            )
 
         # Build model dict
         networks = {
             "actor": policy_def,
             "critic": critic_def,
             "temperature": temperature_def,
-            "align_lagrange": align_lagrange_def,
         }
+        if need_align_module:
+            networks["align_lagrange"] = align_lagrange_def
         model_def = ModuleDict(networks)
 
         # Define optimizers
@@ -452,18 +626,20 @@ class ClosedLoopSACAgent(SACAgent):
             "actor": make_optimizer(**kwargs.get("actor_optimizer_kwargs", {"learning_rate": 3e-4})),
             "critic": make_optimizer(**kwargs.get("critic_optimizer_kwargs", {"learning_rate": 3e-4})),
             "temperature": make_optimizer(**kwargs.get("temperature_optimizer_kwargs", {"learning_rate": 3e-4})),
-            "align_lagrange": make_optimizer(**align_lagrange_optimizer_kwargs),
         }
+        if need_align_module:
+            txs["align_lagrange"] = make_optimizer(**align_lagrange_optimizer_kwargs)
 
         # Initialize parameters
         rng, init_rng = jax.random.split(rng)
-        params = model_def.init(
-            init_rng,
-            actor=[observations],
-            critic=[observations, actions],
-            temperature=[],
-            align_lagrange=[],
-        )["params"]
+        init_kwargs = {
+            "actor": [observations],
+            "critic": [observations, actions],
+            "temperature": [],
+        }
+        if need_align_module:
+            init_kwargs["align_lagrange"] = []
+        params = model_def.init(init_rng, **init_kwargs)["params"]
 
         rng, create_rng = jax.random.split(rng)
         state = JaxRLTrainState.create(
@@ -496,12 +672,23 @@ class ClosedLoopSACAgent(SACAgent):
         closed_loop_config = {
             "align_constraint": align_constraint,
             "lam_align": lam_align,
-            "lam_eff_linear_steps": lam_eff_linear_steps,
+            "align_steps": align_steps,
+            # TD-based trust weighting for policy Q-term (optional)
+            "q_trust_enabled": kwargs.get("q_trust_enabled", False),
+            "q_trust_beta": kwargs.get("q_trust_beta", 1.0),
+            # Policy loss variant: 'align' | 'q_trust'
+            "policy_loss_variant": kwargs.get("policy_loss_variant", "align"),
+            # Current build includes align_lagrange module only if lambda_schedule=='adaptive'
+            "lambda_schedule": kwargs.get("lambda_schedule", "fixed"),
         }
+
+        # Prevent external kwargs from overriding computed target_entropy
+        safe_kwargs = dict(kwargs)
+        safe_kwargs.pop("target_entropy", None)
 
         new_agent = cls(
             state=state,
-            config={**base_config, **kwargs, **closed_loop_config},
+            config={**base_config, **safe_kwargs, **closed_loop_config},
         )
 
         return new_agent

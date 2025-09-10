@@ -1,8 +1,16 @@
 from typing import Optional
 
+import os
+# Suppress optional D4RL import errors to avoid hard failures (mujoco_py etc.)
+os.environ.setdefault("D4RL_SUPPRESS_IMPORT_ERROR", "1")
 import d4rl
+# Ensure Adroit binary envs are registered (door-binary-v0, pen-binary-v0, relocate-binary-v0)
+try:
+    import mj_envs.hand_manipulation_suite  # noqa: F401
+except Exception:
+    # If mj_envs is not available, we continue; only needed for adroit-binary envs
+    pass
 import gym
-import mj_envs
 import numpy as np
 from absl import flags
 

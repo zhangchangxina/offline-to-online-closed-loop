@@ -6,7 +6,7 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/nvidia
 
 export D4RL_DATASET_DIR=/media/nudt3090/XYQ/ZCX/WSRL/datasets/d4rl
 export WANDB_BASE_URL=https://api.bandw.top
-export CUDA_VISIBLE_DEVICES=2
+export CUDA_VISIBLE_DEVICES=3
 
 python3 finetune.py \
 --agent closed_loop_sac \
@@ -19,9 +19,11 @@ python3 finetune.py \
 --utd 4 \
 --batch_size 1024 \
 --warmup_steps 5000 \
---config.agent_kwargs.lambda_schedule=linear \
---config.agent_kwargs.lam_align=1.0 \
---config.agent_kwargs.lam_eff_linear_steps=20000 \
+--config.agent_kwargs.policy_loss_variant=q_trust \
+--config.agent_kwargs.q_trust_beta=2.0 \
+--config.agent_kwargs.lambda_schedule=adaptive \
+--config.agent_kwargs.lam_align=1 \
+--config.agent_kwargs.align_steps=100000 \
 --config.agent_kwargs.align_constraint=0.1 \
 --config.agent_kwargs.align_lagrange_optimizer_kwargs.learning_rate=1e-3 \
 $@

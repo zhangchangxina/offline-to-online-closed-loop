@@ -5,9 +5,9 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$HOME/.mujoco/mujoco210/bin
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/nvidia 
 
 export D4RL_DATASET_DIR=/media/nudt3090/XYQ/ZCX/WSRL/datasets/d4rl
-# export WANDB_BASE_URL=https://api.bandw.top 
-export WANDB_MODE=offline
-export CUDA_VISIBLE_DEVICES=1
+export WANDB_BASE_URL=https://api.bandw.top 
+# export WANDB_MODE=offline
+export CUDA_VISIBLE_DEVICES=0
 
 
 python finetune.py \
@@ -18,5 +18,5 @@ python finetune.py \
 --reward_scale 10.0 \
 --reward_bias -5.0 \
 --num_offline_steps 1_000_000 \
---env antmaze-large-diverse-v2 \
+--env antmaze-umaze-v2 \
 $@

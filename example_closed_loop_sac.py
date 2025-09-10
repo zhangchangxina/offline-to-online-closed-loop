@@ -77,7 +77,7 @@ def main():
         align_constraint=0.1,  # Constraint for E[q_delta^2] <= 0.1
         lam_align=1.0,  # Weight for alignment loss (init)
         # use lambda_schedule instead of deprecated fields
-        lam_eff_linear_steps=100000,  # Steps for linear decay
+        align_steps=100000,  # Steps for linear decay
     )
     
     print(f"Agent created successfully!")

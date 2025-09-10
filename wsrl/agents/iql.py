@@ -227,6 +227,11 @@ class IQLAgent(flax.struct.PyTreeNode):
 
         # MSE loss
         critic_loss = jnp.square(q - target_q)
+        # TD error stats (Q - Q_target) before TD loss
+        td_error = q - target_q
+        td_error_mean = jnp.mean(td_error)
+        td_error_min = jnp.min(td_error)
+        td_error_max = jnp.max(td_error)
         chex.assert_shape(
             critic_loss, (self.config["critic_ensemble_size"], batch_size)
         )
@@ -235,6 +240,9 @@ class IQLAgent(flax.struct.PyTreeNode):
             "td_loss": critic_loss.mean(),
             "q": q.mean(),
             "target_q": target_q.mean(),
+            "td_error_mean": td_error_mean,
+            "td_error_min": td_error_min,
+            "td_error_max": td_error_max,
         }
 
     def value_loss_fn(self, batch, params: Params, rng: PRNGKey):

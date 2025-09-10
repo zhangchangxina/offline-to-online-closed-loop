@@ -19,9 +19,19 @@ def get_config(updates=None):
     # - linear: lam_align = lam_align_init × (1 - progress)
     # - adaptive: lam_align = align_lagrange (learned by positive_violation)
     config.lambda_schedule = "fixed"
-    config.lam_eff_linear_steps = 10000  # used when lambda_schedule == "linear"
+    config.align_steps = 10000  # used when lambda_schedule == "linear"
     config.lam_eff_linear_start_step = 0  # allow offsetting the schedule start (e.g., after resume)
     # For adaptive, align_lagrange init defaults to lam_align unless overridden in agent.create
+
+    # Diagnostics/logging defaults to allow CLI overrides
+    config.log_actor_grad_terms = False
+    config.actor_log_std_layer_name = "Dense_1"
+
+    # Policy loss variant and TD trust settings
+    # 'align' uses q_term + lam_align * align_loss + entropy_term
+    # 'q_trust' uses (-(q_trust_weight * q_new)).mean() + entropy_term
+    config.policy_loss_variant = "align"
+    config.q_trust_beta = 1.0
 
     # Default optimizer settings for the align Lagrange multiplier
     # Added to allow subkey CLI overrides like

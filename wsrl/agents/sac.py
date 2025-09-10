@@ -8,6 +8,7 @@ import flax
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
+import optax
 from absl import flags
 
 from wsrl.common.common import JaxRLTrainState, ModuleDict, nonpytree_field
@@ -272,15 +273,25 @@ class SACAgent(flax.struct.PyTreeNode):
         # MSE loss
         target_qs = target_q[None].repeat(self.config["critic_ensemble_size"], axis=0)
         chex.assert_equal_shape([predicted_qs, target_qs])
+        # TD error stats (Q - Q_target) before TD loss
+        td_error = predicted_qs - target_qs
+        td_error_mean = jnp.mean(td_error)
+        td_error_min = jnp.min(td_error)
+        td_error_max = jnp.max(td_error)
         critic_loss = jnp.mean((predicted_qs - target_qs) ** 2)
 
         info = {
             "critic_loss": critic_loss,
             "predicted_qs": jnp.mean(predicted_qs),
             "target_qs": jnp.mean(target_q),
+            "td_error_mean": td_error_mean,
+            "td_error_min": td_error_min,
+            "td_error_max": td_error_max,
         }
 
         return critic_loss, info
+
+    
 
     def policy_loss_fn(self, batch, params: Params, rng: PRNGKey):
         batch_size = batch["rewards"].shape[0]
@@ -307,19 +318,72 @@ class SACAgent(flax.struct.PyTreeNode):
             action_distributions.log_prob(jnp.clip(batch["actions"], -0.99, 0.99))
         )
         actor_objective = predicted_q
-        actor_loss = -jnp.mean(actor_objective) + jnp.mean(temperature * log_probs)
+        # Individual terms for clearer logging/instrumentation
+        q_term = -jnp.mean(actor_objective)
+        entropy_term = jnp.mean(temperature * log_probs)
+        actor_loss = q_term + entropy_term
 
         info = {
             "actor_loss": actor_loss,
             "actor_nll": nll_objective,
             "temperature": temperature,
+            "target_entropy": self.config["target_entropy"],
             "entropy": -log_probs.mean(),
             "log_probs": log_probs,
             "actions_mse": ((actions - batch["actions"]) ** 2).sum(axis=-1).mean(),
             "dataset_rewards": batch["rewards"],
             "mc_returns": batch.get("mc_returns", None),
             "actions": actions,
+            # Explicitly log per-term values
+            "q_term": q_term,
+            "entropy_term": entropy_term,
         }
+
+        # Optional: per-term gradient norms for actor params (and log_std layer)
+        if self.config.get("log_actor_grad_terms", False):
+            log_std_layer_name = self.config.get("actor_log_std_layer_name", "Dense_1")
+
+            def q_term_fn(p):
+                # Re-sample actions with same RNGs to include reparameterization path
+                dist = self.forward_policy(batch["observations"], rng=policy_rng, grad_params=p)
+                a, _ = dist.sample_and_log_prob(seed=sample_rng)
+                qs = self.forward_critic(batch["observations"], a, rng=critic_rng)
+                return -qs.min(axis=0).mean()
+
+            def entropy_term_fn(p):
+                dist = self.forward_policy(batch["observations"], rng=policy_rng, grad_params=p)
+                _, lp = dist.sample_and_log_prob(seed=sample_rng)
+                return (temperature * lp).mean()
+
+            g_q_full = jax.grad(q_term_fn)(params)
+            g_ent_full = jax.grad(entropy_term_fn)(params)
+
+            g_q_actor = g_q_full.get("actor", {})
+            g_ent_actor = g_ent_full.get("actor", {})
+            info["actor_grad_norm_q"] = optax.global_norm(g_q_actor)
+            info["actor_grad_norm_entropy"] = optax.global_norm(g_ent_actor)
+
+            # Try to isolate the final std head (best-effort; default Dense_1)
+            try:
+                g_q_logstd = g_q_actor.get(log_std_layer_name, None)
+                g_ent_logstd = g_ent_actor.get(log_std_layer_name, None)
+                info["actor_grad_norm_q_log_std"] = (
+                    optax.global_norm(g_q_logstd) if g_q_logstd is not None else jnp.array(0.0, jnp.float32)
+                )
+                info["actor_grad_norm_entropy_log_std"] = (
+                    optax.global_norm(g_ent_logstd) if g_ent_logstd is not None else jnp.array(0.0, jnp.float32)
+                )
+            except Exception:
+                info["actor_grad_norm_q_log_std"] = jnp.array(0.0, jnp.float32)
+                info["actor_grad_norm_entropy_log_std"] = jnp.array(0.0, jnp.float32)
+
+            # Also log ||dQ/da|| to diagnose Q sensitivity to actions
+            def q_min_mean_fn(a):
+                qs = self.forward_critic(batch["observations"], a, rng=critic_rng)
+                return qs.min(axis=0).mean()
+
+            dq_da = jax.grad(q_min_mean_fn)(actions)
+            info["dq_da_l2_mean"] = jnp.linalg.norm(dq_da, axis=-1).mean()
 
         # optionally add BC regularization
         if self.config.get("bc_loss_weight", 0.0) > 0:
@@ -348,7 +412,11 @@ class SACAgent(flax.struct.PyTreeNode):
             entropy,
             grad_params=params,
         )
-        return temperature_loss, {"temperature_loss": temperature_loss}
+        return temperature_loss, {
+            "temperature_loss": temperature_loss,
+            "temperature_entropy": entropy,
+            "temperature_target_entropy": self.config["target_entropy"],
+        }
 
     def loss_fns(self, batch):
         return {
@@ -452,10 +520,29 @@ class SACAgent(flax.struct.PyTreeNode):
 
     def update_config(self, new_config):
         """update the frozen self.config"""
-        # Support plain dict config: copy then update
-        cfg = self.config.copy()
-        cfg.update(new_config)
-        object.__setattr__(self, "config", cfg)
+        # Handle different possible config container types (dict, ConfigDict, FrozenDict)
+        try:
+            from flax.core.frozen_dict import FrozenDict, unfreeze, freeze
+            is_frozen = isinstance(self.config, FrozenDict)
+        except Exception:  # flax may not be available in some contexts
+            unfreeze = freeze = None  # type: ignore
+            is_frozen = False
+
+        if is_frozen:
+            cfg_mutable = unfreeze(self.config)
+        else:
+            # Fallback: shallow copy if available, else construct a dict
+            try:
+                cfg_mutable = self.config.copy()
+            except Exception:
+                cfg_mutable = dict(self.config)
+
+        # Shallow update is sufficient for our use (we only set top-level keys)
+        cfg_mutable.update(new_config)
+
+        # Restore original container type
+        cfg_final = freeze(cfg_mutable) if is_frozen else cfg_mutable
+        object.__setattr__(self, "config", cfg_final)
 
     @classmethod
     def _create_common(
@@ -529,6 +616,10 @@ class SACAgent(flax.struct.PyTreeNode):
         if target_entropy is None or target_entropy >= 0.0:
             target_entropy = -actions.shape[-1]
 
+        # Prevent external kwargs from overriding computed target_entropy
+        safe_kwargs = dict(kwargs)
+        safe_kwargs.pop("target_entropy", None)
+
         return cls(
             state=state,
             config=dict(
@@ -541,7 +632,7 @@ class SACAgent(flax.struct.PyTreeNode):
                 bc_loss_weight=bc_loss_weight,
                 n_actions=n_actions,
                 max_target_backup=max_target_backup,
-                **kwargs,
+                **safe_kwargs,
             ),
         )
 
