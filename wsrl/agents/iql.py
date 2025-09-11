@@ -55,17 +55,29 @@ def awr_actor_loss(q, v, dist, actions, temperature=1.0, adv_clip_max=100.0, mas
     else:
         actor_loss = jnp.mean(actor_loss)
 
-    behavior_mse = jnp.square(dist.mode() - actions).sum(-1)
+    pi_actions = dist.mode()
+    behavior_mse = jnp.square(pi_actions - actions).sum(-1)
 
     return actor_loss, {
         "actor_loss": actor_loss,
         "behavior_logprob": log_probs.mean(),
         "behavior_entropy": -log_probs.mean(),
         "behavior_mse": behavior_mse.mean(),
+        # Action stats (dataset vs policy)
+        "batch_actions_var": jnp.var(actions, axis=0).mean(),
+        "pi_actions_var": jnp.var(pi_actions, axis=0).mean(),
+        "batch_actions_mean": jnp.mean(actions, axis=0).mean(),
+        "pi_actions_mean": jnp.mean(pi_actions, axis=0).mean(),
+        "batch_actions_sq_mean": jnp.mean(jnp.square(actions), axis=0).mean(),
+        "pi_actions_sq_mean": jnp.mean(jnp.square(pi_actions), axis=0).mean(),
+        "batch_actions_max": jnp.max(actions),
+        "batch_actions_min": jnp.min(actions),
+        "pi_actions_max": jnp.max(pi_actions),
+        "pi_actions_min": jnp.min(pi_actions),
         "adv_mean": adv.mean(),
         "adv_max": adv.max(),
         "adv_min": adv.min(),
-        "predicted actions": dist.mode(),
+        "predicted actions": pi_actions,
         "dataset actions": actions,
     }
 
@@ -79,10 +91,22 @@ def ddpg_bc_actor_loss(q, dist, actions, bc_loss_weight, mask=None):
         actor_loss = jnp.sum(actor_loss) / jnp.sum(mask)
     else:
         actor_loss = jnp.mean(actor_loss)
+    pi_actions = dist.mode()
     return actor_loss, {
         "bc_loss": bc_loss.mean(),
         "ddpg_objective": ddpg_objective.mean(),
         "actor_loss": actor_loss,
+        # Action stats (dataset vs policy)
+        "batch_actions_var": jnp.var(actions, axis=0).mean(),
+        "pi_actions_var": jnp.var(pi_actions, axis=0).mean(),
+        "batch_actions_mean": jnp.mean(actions, axis=0).mean(),
+        "pi_actions_mean": jnp.mean(pi_actions, axis=0).mean(),
+        "batch_actions_sq_mean": jnp.mean(jnp.square(actions), axis=0).mean(),
+        "pi_actions_sq_mean": jnp.mean(jnp.square(pi_actions), axis=0).mean(),
+        "batch_actions_max": jnp.max(actions),
+        "batch_actions_min": jnp.min(actions),
+        "pi_actions_max": jnp.max(pi_actions),
+        "pi_actions_min": jnp.min(pi_actions),
     }
 
 
