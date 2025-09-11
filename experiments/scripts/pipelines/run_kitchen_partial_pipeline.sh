@@ -68,7 +68,35 @@ echo "[GPU ${GPU_ID}] Using checkpoint: ${CKPT_PATH}"
 #
 # SAC-BC variant (actor_target as BC teacher + TD-weighted BC)
 #
-echo "[GPU ${GPU_ID}] WSRL (SAC-BC) from CALQL-1M for ${ENV_ID}"
+# echo "[GPU ${GPU_ID}] WSRL (SAC-BC) from CALQL-1M for ${ENV_ID}"
+# python3 finetune.py \
+#   --agent sac_bc \
+#   --config experiments/configs/train_config.py:kitchen_wsrl \
+#   --env ${ENV_ID} \
+#   --seed ${SEED} \
+#   --use_redq True \
+#   --reward_scale ${R_SCALE} \
+#   --reward_bias ${R_BIAS} \
+#   --resume_path ${CKPT_PATH} \
+#   --num_offline_steps 250000 \
+#   --utd 4 \
+#   --batch_size 1024 \
+#   --warmup_steps 5000 \
+#   --config.agent_kwargs.bc_loss_weight=1.0 \
+#   --config.agent_kwargs.bc_target=dataset \
+#   --config.agent_kwargs.bc_teacher_deterministic=False \
+#   --config.agent_kwargs.bc_weight_mode=td \
+#   --config.agent_kwargs.bc_uncert_action_source=policy \
+#   --config.agent_kwargs.bc_uncert_q_source=current \
+#   --config.agent_kwargs.bc_weight_uncert_measure=std \
+#   --config.agent_kwargs.bc_weight_clip=10.0 \
+#   --config.agent_kwargs.bc_weight_scale=1.0 \
+#   --config.agent_kwargs.bc_weight_normalize=False \
+#   --config.agent_kwargs.bc_online_enable_for_steps=100000000 \
+#   --exp_name wsrl_sacbc \
+#   --save_dir ${SAVE_ROOT} | cat
+
+  echo "[GPU ${GPU_ID}] WSRL (SAC-BC) from CALQL-1M for ${ENV_ID}"
 python3 finetune.py \
   --agent sac_bc \
   --config experiments/configs/train_config.py:kitchen_wsrl \
@@ -79,18 +107,21 @@ python3 finetune.py \
   --reward_bias ${R_BIAS} \
   --resume_path ${CKPT_PATH} \
   --num_offline_steps 250000 \
+  --num_online_steps 500000 \
   --utd 4 \
   --batch_size 1024 \
-  --warmup_steps 5000 \
+  --warmup_steps 0 \
   --config.agent_kwargs.bc_loss_weight=1.0 \
-  --config.agent_kwargs.bc_target=dataset \
-  --config.agent_kwargs.bc_td_weight_inverse=True \
-  --config.agent_kwargs.bc_teacher_deterministic=False \
-  --config.agent_kwargs.bc_td_weight_enabled=False \
-  --config.agent_kwargs.bc_td_weight_clip=10.0 \
-  --config.agent_kwargs.bc_td_weight_scale=1 \
-  --config.agent_kwargs.bc_td_weight_power=2.0 \
-  --config.agent_kwargs.bc_online_enable_for_steps=-1 \
+  --config.agent_kwargs.bc_target=actor_target \
+  --config.agent_kwargs.bc_teacher_deterministic=True \
+  --config.agent_kwargs.bc_weight_mode=uncert \
+  --config.agent_kwargs.bc_uncert_action_source=policy \
+  --config.agent_kwargs.bc_uncert_q_source=current \
+  --config.agent_kwargs.bc_weight_uncert_measure=std \
+  --config.agent_kwargs.bc_weight_clip=10.0 \
+  --config.agent_kwargs.bc_weight_scale=1.0 \
+  --config.agent_kwargs.bc_weight_normalize=False \
+  --config.agent_kwargs.bc_online_enable_for_steps=100000000 \
   --exp_name wsrl_sacbc \
   --save_dir ${SAVE_ROOT} | cat
 

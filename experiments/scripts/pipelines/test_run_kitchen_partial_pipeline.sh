@@ -94,9 +94,9 @@ python3 finetune.py \
   --eval_interval 1 \
   --log_interval 1 \
   --config.agent_kwargs.bc_loss_weight=1.0 \
-  --config.agent_kwargs.bc_mode=actor_target \
-  --config.agent_kwargs.bc_td_weight_enabled=True \
-  --config.agent_kwargs.bc_td_weight_clip=10.0 \
+  --config.agent_kwargs.bc_target=actor_target \
+  --config.agent_kwargs.bc_weight_mode=td \
+  --config.agent_kwargs.bc_weight_clip=10.0 \
   --exp_name wsrl_sacbc_test \
   --save_dir ${SAVE_ROOT} | cat
 

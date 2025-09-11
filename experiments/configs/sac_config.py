@@ -54,31 +54,33 @@ def get_config(updates=None):
         }
     )
 
-    # BC augmentation defaults (used by SACBCWithTargetAgent and can be set for SAC variants)
+    # BC augmentation defaults (used by SACBCWithTargetAgent)
     config.bc_loss_weight = 0.0
-    config.bc_mode = "dataset"  # "dataset" | "actor_target"
     config.bc_combine_mode = "sum"  # "sum" | "interpolate"
     config.bc_teacher_deterministic = True
-    config.bc_teacher_eval_mode = True  # If True, teacher uses train=False (no dropout)
-    # Unified target selector: "dataset" | "actor_target" | "offline_checkpoint"
-    # If not set, code will fall back to bc_mode/bc_teacher_source for backward-compat
+    config.bc_teacher_eval_mode = True  # teacher uses train=False (no dropout)
+    # Unified target: "dataset" | "actor_target" | path to offline checkpoint
     config.bc_target = "dataset"
-    config.bc_teacher_source = "actor_target"  # legacy; kept for backward-compat
-    config.bc_offline_ckpt_teacher = ""  # path to offline teacher checkpoint dir
-    # Enable BC only for first N ONLINE steps; <0 disables online gating
+    # Online gating: 0=off; >0: window; -1: always on after online start
     config.bc_online_enable_for_steps = -1
-    # Will be set at online switch time in finetune.py
+    # Set at online switch time in finetune.py
     config.bc_online_start_step = -1
-    config.bc_td_weight_enabled = False
-    config.bc_td_weight_abs = True
-    config.bc_td_weight_power = 1.0
-    config.bc_td_weight_scale = 1.0
-    # Use a float sentinel for CLI override compatibility; <=0 means "disabled"
-    config.bc_td_weight_clip = -1.0
-    config.bc_td_weight_normalize = False  # If True, divide weights by mean
-    # Optional: inverse mapping (only meaningful when bc_target=="dataset")
-    config.bc_td_weight_inverse = False  # If True, weights = 1/(|delta|+eps)
-    config.bc_td_weight_inverse_eps = 1e-3
+
+    # Simplified BC per-sample weighting mode (preferred API)
+    # one of: "none" | "td" | "td_inverse" | "uncert" | "uncert_inverse"
+    # - td:        weights = |q_delta|
+    # - td_inverse:weights = 1/(|q_delta|+eps)
+    # - uncert:    weights = std_ensemble(Q(s,a))
+    # - uncert_inverse: weights = 1/(std_ensemble(Q)+eps)
+    config.bc_weight_mode = "none"
+    config.bc_weight_eps = 1e-3
+    config.bc_weight_scale = 1.0
+    config.bc_weight_clip = -1.0    # <=0 disables clip
+    config.bc_weight_normalize = False
+    # Uncertainty options
+    config.bc_uncert_q_source = "current"  # target|current|q
+    config.bc_uncert_action_source = "policy"  # bc|policy|dataset|teacher
+    config.bc_weight_uncert_measure = "std"  # std|var
 
     if updates is not None:
         config.update(ConfigDict(updates).copy_and_resolve_references())

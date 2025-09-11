@@ -37,9 +37,9 @@ $@
 # --batch_size 1024 \
 # --warmup_steps 5000 \
 # --config.agent_kwargs.bc_loss_weight=1.0 \
-# --config.agent_kwargs.bc_mode=actor_target \
+# --config.agent_kwargs.bc_target=actor_target \
 # --config.agent_kwargs.bc_teacher_eval_mode=True \
-# --config.agent_kwargs.bc_td_weight_enabled=True \
-# --config.agent_kwargs.bc_td_weight_normalize=True \
-# --config.agent_kwargs.bc_td_weight_clip=10.0 \
+# --config.agent_kwargs.bc_weight_mode=td \
+# --config.agent_kwargs.bc_weight_normalize=True \
+# --config.agent_kwargs.bc_weight_clip=10.0 \
 # $@

@@ -148,13 +148,14 @@ class SACBCWithTargetAgent(SACAgent):
         online_start_val = jnp.asarray(int(self.config.get("bc_online_start_step", -1)), dtype=jnp.int32)
         online_for_val = jnp.asarray(int(self.config.get("bc_online_enable_for_steps", -1)), dtype=jnp.int32)
 
-        within_online_window = (
-            (online_start_val >= 0)
-            & (online_for_val > 0)
-            & (step >= online_start_val)
-            & (step < (online_start_val + online_for_val))
+        # Online gating semantics (simplified):
+        # len == 0 -> off; len > 0 -> [start, start+len); len == -1 -> [start, +∞)
+        start_ok = (online_start_val >= 0)
+        after_start = (step >= online_start_val)
+        in_window = (online_for_val == jnp.asarray(-1, dtype=jnp.int32)) | (
+            (online_for_val > 0) & (step < (online_start_val + online_for_val))
         )
-        bc_enabled_bool = (bc_weight > 0.0) & within_online_window
+        bc_enabled_bool = (bc_weight > 0.0) & start_ok & after_start & in_window
         bc_mask = bc_enabled_bool.astype(jnp.float32)
 
         # Resolve BC target (unified key bc_target preferred; fallback to bc_mode + bc_teacher_source)
@@ -198,6 +199,19 @@ class SACBCWithTargetAgent(SACAgent):
             if bool(self.config.get("bc_teacher_deterministic", True)):
                 # Deterministic teacher: use mode()
                 teacher_actions = teacher_dist.mode()
+                # Also compare against dataset action; pick the one with higher min-ensemble Q
+                rng, critic_rng_teacher = jax.random.split(rng)
+                ds_action = jnp.clip(batch["actions"], -0.99, 0.99)
+                qs_mode = self.forward_target_critic(
+                    batch["observations"], teacher_actions, rng=critic_rng_teacher
+                )  # (ensemble, batch)
+                qs_ds = self.forward_target_critic(
+                    batch["observations"], ds_action, rng=critic_rng_teacher
+                )  # (ensemble, batch)
+                qmin_mode = qs_mode.min(axis=0)
+                qmin_ds = qs_ds.min(axis=0)
+                use_ds = (qmin_ds > qmin_mode)  # (batch,)
+                teacher_actions = jnp.where(use_ds[:, None], ds_action, teacher_actions)
             else:
                 # Stochastic teacher: sample multiple candidates and pick the one with max Q(s, a)
                 # Number of candidates (default 10)
@@ -207,12 +221,16 @@ class SACBCWithTargetAgent(SACAgent):
                 cand_actions = teacher_dist.sample(seed=teacher_sample_rng, sample_shape=(n_candidates,))
                 # cand_actions: (n, batch, act_dim) -> (batch, n, act_dim)
                 cand_actions = jnp.transpose(cand_actions, (1, 0, 2))
+                # Also include one dataset action as an extra candidate per sample
+                ds_action = jnp.clip(batch["actions"], -0.99, 0.99)  # (batch, act_dim)
+                ds_action = ds_action[:, None, :]  # (batch, 1, act_dim)
+                cand_actions = jnp.concatenate([cand_actions, ds_action], axis=1)  # (batch, n+1, act_dim)
                 # Evaluate target critic Q(s, a) for all candidates; result: (ensemble, batch, n)
                 qs_cand = self.forward_target_critic(
                     batch["observations"], cand_actions, rng=critic_rng_teacher
                 )
                 # Min over ensemble, then argmax over candidates
-                q_min = qs_cand.min(axis=0)  # (batch, n)
+                q_min = qs_cand.min(axis=0)  # (batch, n+1)
                 best_idx = jnp.argmax(q_min, axis=-1)  # (batch,)
                 best_idx_exp = jnp.expand_dims(best_idx, axis=-1)
                 teacher_actions = jnp.take_along_axis(cand_actions, best_idx_exp[..., None], axis=1).squeeze(axis=1)
@@ -227,8 +245,8 @@ class SACBCWithTargetAgent(SACAgent):
 
         chex.assert_shape(bc_per, (batch_size,))
 
-        # TD-weighted coefficient (optional). Weight is per-sample and stop-gradient.
-        if bool(self.config.get("bc_td_weight_enabled", False)):
+        # Per-sample BC weighting (preferred: bc_weight_mode)
+        if False:
             q_delta = self._compute_td_q_delta(
                 batch,
                 td_rng,
@@ -260,8 +278,95 @@ class SACBCWithTargetAgent(SACAgent):
 
             bc_loss = jnp.mean(weights * bc_per)
         else:
-            weights = jnp.ones((batch_size,), dtype=bc_per.dtype)
-            bc_loss = bc_per.mean()
+            # Use simplified bc_weight_mode (support aliases)
+            mode_raw = str(self.config.get("bc_weight_mode", "none"))
+            if mode_raw in ("pure", "pure_bc", "fixed", "uniform"):
+                mode = "none"
+            else:
+                mode = mode_raw
+            if mode != "none":
+                # Choose actions to evaluate on (configurable)
+                action_src = str(self.config.get("bc_uncert_action_source", "bc"))
+                if action_src in ("policy", "q", "pi"):
+                    eval_actions = actions
+                elif action_src == "dataset":
+                    eval_actions = jnp.clip(batch["actions"], -0.99, 0.99)
+                elif action_src == "teacher":
+                    eval_actions = teacher_actions if (bc_mode == "actor_target") else jnp.clip(batch["actions"], -0.99, 0.99)
+                else:
+                    # default: match BC target
+                    eval_actions = teacher_actions if (bc_mode == "actor_target") else jnp.clip(batch["actions"], -0.99, 0.99)
+                # If uncertainty path needed, get ensemble Q(s,a)
+                if (mode == "uncert") or (mode == "uncert_inverse"):
+                    q_src = str(self.config.get("bc_uncert_q_source", "target"))
+                    use_target = (q_src in ("target"))
+                    if use_target:
+                        qs_eval = self.forward_target_critic(batch["observations"], eval_actions, rng=critic_rng)
+                    else:
+                        qs_eval = self.forward_critic(batch["observations"], eval_actions, rng=critic_rng)
+                    measure = str(self.config.get("bc_weight_uncert_measure", "std"))
+                    base = jnp.var(qs_eval, axis=0) if (measure == "var") else jnp.std(qs_eval, axis=0)
+                else:
+                    # td / td_inverse: need q_delta per sample
+                    q_delta = self._compute_td_q_delta(batch, td_rng, policy_grad_params=params)
+                    base = jnp.abs(q_delta)
+
+                eps = float(self.config.get("bc_weight_eps", 1e-3))
+                if mode.endswith("inverse"):
+                    weights = 1.0 / (base + eps)
+                else:
+                    weights = base
+                power = float(self.config.get("bc_weight_power", self.config.get("bc_uncert_power", 1.0)))
+                if power != 1.0:
+                    weights = jnp.power(weights, power)
+                clip_val = float(self.config.get("bc_weight_clip", -1.0))
+                if clip_val > 0.0:
+                    weights = jnp.clip(weights, 0.0, clip_val)
+                if bool(self.config.get("bc_weight_normalize", True)):
+                    weights = weights / (jnp.mean(weights) + 1e-8)
+                scale = float(self.config.get("bc_weight_scale", 1.0))
+                if scale != 1.0:
+                    weights = weights * scale
+                weights = jax.lax.stop_gradient(weights)
+                bc_loss = jnp.mean(weights * bc_per)
+            # Back-compat path: uncertainty block (if configured via old flags)
+            elif bool(self.config.get("bc_uncert_weight_enabled", False)):
+                q_source = self.config.get("bc_uncert_q_source", "target")
+                use_target = (q_source == "target")
+                # Choose actions to evaluate uncertainty on (match BC target)
+                eval_actions = teacher_actions if (bc_mode == "actor_target") else jnp.clip(batch["actions"], -0.99, 0.99)
+                # Evaluate ensemble Q(s,a): shape (ensemble, batch)
+                if use_target:
+                    qs_eval = self.forward_target_critic(batch["observations"], eval_actions, rng=critic_rng)
+                else:
+                    qs_eval = self.forward_critic(batch["observations"], eval_actions, rng=critic_rng)
+                # Uncertainty measure across ensemble
+                if self.config.get("bc_uncert_measure", "std") == "std":
+                    uncert = jnp.std(qs_eval, axis=0)
+                else:
+                    uncert = jnp.std(qs_eval, axis=0)
+                # Map to weights
+                if bool(self.config.get("bc_uncert_inverse", False)):
+                    eps = float(self.config.get("bc_uncert_inverse_eps", 1e-3))
+                    weights = 1.0 / (uncert + eps)
+                else:
+                    weights = uncert
+                power = float(self.config.get("bc_uncert_power", 1.0))
+                if power != 1.0:
+                    weights = jnp.power(weights, power)
+                clip_val = float(self.config.get("bc_uncert_clip", -1.0))
+                if clip_val > 0.0:
+                    weights = jnp.clip(weights, 0.0, clip_val)
+                if bool(self.config.get("bc_uncert_normalize", False)):
+                    weights = weights / (jnp.mean(weights) + 1e-8)
+                scale = float(self.config.get("bc_uncert_scale", 1.0))
+                if scale != 1.0:
+                    weights = weights * scale
+                weights = jax.lax.stop_gradient(weights)
+                bc_loss = jnp.mean(weights * bc_per)
+            else:
+                weights = jnp.ones((batch_size,), dtype=bc_per.dtype)
+                bc_loss = bc_per.mean()
 
         # Combine with original SAC actor loss using a mask so it's traceable
         combine_mode = self.config.get("bc_combine_mode", "sum")  # "sum" | "interpolate"
@@ -271,14 +376,18 @@ class SACBCWithTargetAgent(SACAgent):
         else:
             actor_loss = actor_loss + (bc_weight * bc_loss * bc_mask)
 
-        # Log diagnostics
+        # Log diagnostics (mask bc_loss so it's 0 outside the online window)
         info["bc_loss"] = bc_loss
         info["bc_neglogp_mean"] = bc_per.mean()
         info["bc_weight_mean"] = weights.mean()
+        info["bc_weight_std"] = weights.std()
+        info["bc_weight_max"] = weights.max()
+        info["bc_weight_min"] = weights.min()
         info["bc_mode_code"] = jnp.asarray(1 if bc_mode == "actor_target" else 0, dtype=jnp.int32)
         info["bc_target_code"] = jnp.asarray({"dataset":0, "actor_target":1, "offline_checkpoint":2}.get(bc_target, 0), dtype=jnp.int32)
         info["actor_loss"] = actor_loss
         info["bc_enabled"] = bc_enabled_bool.astype(jnp.int32)
+        info["bc_mask"] = bc_mask
         # Reduce logging payload to scalars for performance
         info["log_probs_mean"] = log_probs.mean()
         info.pop("log_probs", None)

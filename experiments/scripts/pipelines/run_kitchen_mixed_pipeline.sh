@@ -77,11 +77,11 @@ echo "[GPU ${GPU_ID}] Using checkpoint: ${CKPT_PATH}"
 #   --batch_size 1024 \
 #   --warmup_steps 5000 \
 #   --config.agent_kwargs.bc_loss_weight=1.0 \
-#   --config.agent_kwargs.bc_mode=actor_target \
+#   --config.agent_kwargs.bc_target=actor_target \
 #   --config.agent_kwargs.bc_teacher_eval_mode=True \
-#   --config.agent_kwargs.bc_td_weight_enabled=True \
-#   --config.agent_kwargs.bc_td_weight_normalize=True \
-#   --config.agent_kwargs.bc_td_weight_clip=10.0 \
+#   --config.agent_kwargs.bc_weight_mode=td \
+#   --config.agent_kwargs.bc_weight_normalize=True \
+#   --config.agent_kwargs.bc_weight_clip=10.0 \
 #   --exp_name wsrl_sacbc \
 #   --save_dir ${SAVE_ROOT} | cat
 
@@ -109,9 +109,37 @@ echo "[GPU ${GPU_ID}] Using checkpoint: ${CKPT_PATH}"
 #   --exp_name clsac \
 #   --save_dir ${SAVE_ROOT} | cat
 
+# python3 finetune.py \
+#   --agent closed_loop_sac \
+#   --config experiments/configs/train_config.py:kitchen_closed_loop_sac \
+#   --env ${ENV_ID} \
+#   --seed ${SEED} \
+#   --use_redq True \
+#   --reward_scale ${R_SCALE} \
+#   --reward_bias ${R_BIAS} \
+#   --resume_path ${CKPT_PATH} \
+#   --num_offline_steps 250000 \
+#   --utd 4 \
+#   --batch_size 1024 \
+#   --warmup_steps 5000 \
+#   --config.agent_kwargs.policy_loss_variant=align \
+#   --config.agent_kwargs.q_trust_beta=2.0 \
+#   --config.agent_kwargs.lambda_schedule=linear \
+#   --config.agent_kwargs.lam_align=1 \
+#   --config.agent_kwargs.align_steps=100000 \
+#   --config.agent_kwargs.align_constraint=0.1 \
+#   --config.agent_kwargs.align_lagrange_optimizer_kwargs.learning_rate=1e-3 \
+#   --config.agent_kwargs.log_actor_grad_terms=True \
+#   --config.agent_kwargs.actor_log_std_layer_name=Dense_1 \
+#   --exp_name clsac \
+#   --save_dir ${SAVE_ROOT} | cat
+
+
+
+  echo "[GPU ${GPU_ID}] WSRL (SAC-BC) from CALQL-1M for ${ENV_ID}"
 python3 finetune.py \
-  --agent closed_loop_sac \
-  --config experiments/configs/train_config.py:kitchen_closed_loop_sac \
+  --agent sac_bc \
+  --config experiments/configs/train_config.py:kitchen_wsrl \
   --env ${ENV_ID} \
   --seed ${SEED} \
   --use_redq True \
@@ -119,19 +147,22 @@ python3 finetune.py \
   --reward_bias ${R_BIAS} \
   --resume_path ${CKPT_PATH} \
   --num_offline_steps 250000 \
+  --num_online_steps 500000 \
   --utd 4 \
   --batch_size 1024 \
   --warmup_steps 5000 \
-  --config.agent_kwargs.policy_loss_variant=align \
-  --config.agent_kwargs.q_trust_beta=2.0 \
-  --config.agent_kwargs.lambda_schedule=linear \
-  --config.agent_kwargs.lam_align=1 \
-  --config.agent_kwargs.align_steps=100000 \
-  --config.agent_kwargs.align_constraint=0.1 \
-  --config.agent_kwargs.align_lagrange_optimizer_kwargs.learning_rate=1e-3 \
-  --config.agent_kwargs.log_actor_grad_terms=True \
-  --config.agent_kwargs.actor_log_std_layer_name=Dense_1 \
-  --exp_name clsac \
+  --config.agent_kwargs.bc_loss_weight=1.0 \
+  --config.agent_kwargs.bc_target=dataset \
+  --config.agent_kwargs.bc_teacher_deterministic=True \
+  --config.agent_kwargs.bc_weight_mode=td_inverse \
+  --config.agent_kwargs.bc_uncert_action_source=policy \
+  --config.agent_kwargs.bc_uncert_q_source=current \
+  --config.agent_kwargs.bc_weight_uncert_measure=std \
+  --config.agent_kwargs.bc_weight_clip=10.0 \
+  --config.agent_kwargs.bc_weight_scale=1.0 \
+  --config.agent_kwargs.bc_weight_normalize=False \
+  --config.agent_kwargs.bc_online_enable_for_steps=100000000 \
+  --exp_name wsrl_sacbc \
   --save_dir ${SAVE_ROOT} | cat
 
 

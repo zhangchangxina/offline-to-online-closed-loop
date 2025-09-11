@@ -151,10 +151,11 @@ python3 finetune.py \
   --config.agent_kwargs.bc_loss_weight=1.0 \
   --config.agent_kwargs.bc_target=${CKPT_PATH} \
   --config.agent_kwargs.bc_teacher_deterministic=False \
-  --config.agent_kwargs.bc_td_weight_enabled=True \
-  --config.agent_kwargs.bc_td_weight_clip=10.0 \
-  --config.agent_kwargs.bc_td_weight_scale=1 \
-  --config.agent_kwargs.bc_td_weight_power=2.0 \
+  --config.agent_kwargs.bc_weight_mode=uncert_inverse \
+  --config.agent_kwargs.bc_uncert_q_source=target \
+  --config.agent_kwargs.bc_weight_clip=10.0 \
+  --config.agent_kwargs.bc_weight_scale=1.0 \
+  --config.agent_kwargs.bc_weight_normalize=True \
   --config.agent_kwargs.bc_online_enable_for_steps=-1 \
   --exp_name wsrl_sacbc \
   --save_dir ${SAVE_ROOT} | cat
