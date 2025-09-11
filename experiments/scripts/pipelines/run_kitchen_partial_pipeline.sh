@@ -82,15 +82,15 @@ python3 finetune.py \
   --utd 4 \
   --batch_size 1024 \
   --warmup_steps 5000 \
-  --warmup_update_critic True \
   --config.agent_kwargs.bc_loss_weight=1.0 \
-  --config.agent_kwargs.bc_target=${CKPT_PATH} \
-  --config.agent_kwargs.bc_teacher_deterministic=True \
-  --config.agent_kwargs.bc_td_weight_enabled=True \
+  --config.agent_kwargs.bc_target=dataset \
+  --config.agent_kwargs.bc_td_weight_inverse=True \
+  --config.agent_kwargs.bc_teacher_deterministic=False \
+  --config.agent_kwargs.bc_td_weight_enabled=False \
   --config.agent_kwargs.bc_td_weight_clip=10.0 \
-  --config.agent_kwargs.bc_td_weight_scale=0.5 \
+  --config.agent_kwargs.bc_td_weight_scale=1 \
   --config.agent_kwargs.bc_td_weight_power=2.0 \
-  --config.agent_kwargs.bc_online_enable_for_steps=10000 \
+  --config.agent_kwargs.bc_online_enable_for_steps=-1 \
   --exp_name wsrl_sacbc \
   --save_dir ${SAVE_ROOT} | cat
 

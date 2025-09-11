@@ -238,7 +238,7 @@ def qlearning_dataset_and_calc_mc(
                 episode_data["rewards"] * reward_scale + reward_bias
             )
             episode_data["mc_returns"] = calc_return_to_go(
-                env.spec.name,
+                env.unwrapped.spec.id,
                 episode_data["rewards"],
                 1 - episode_data["terminals"],
                 gamma,

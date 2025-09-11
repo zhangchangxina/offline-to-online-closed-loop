@@ -16,7 +16,7 @@ export D4RL_DATASET_DIR=/media/nudt3090/XYQ/ZCX/WSRL/datasets/d4rl
 export WANDB_BASE_URL=https://api.bandw.top
 export JAX_TRACEBACK_FILTERING=off
 
-ENV_ID="antmaze-umaze-diverse-v0"
+ENV_ID="antmaze-large-diverse-v2"
 SEED=0
 SAVE_ROOT="/media/nudt3090/XYQ/ZCX/WSRL/wsrl_log"
 PROJECT_DIR="wsrl"
@@ -25,85 +25,64 @@ PROJECT_DIR="wsrl"
 R_SCALE=10.0
 R_BIAS=-5.0
 
-# echo "[GPU ${GPU_ID}] CALQL (REDQ10, UTD=4) pretrain+online for ${ENV_ID}"
-# python3 finetune.py \
-#   --agent calql \
-#   --config experiments/configs/train_config.py:antmaze_cql \
-#   --env ${ENV_ID} \
-#   --seed ${SEED} \
-#   --use_redq True \
-#   --utd 4 \
-#   --reward_scale ${R_SCALE} \
-#   --reward_bias ${R_BIAS} \
-#   --num_offline_steps 1000000 \
-#   --save_interval 100000 \
-#   --exp_name calql_ensemble_highutd \
-#   --save_dir ${SAVE_ROOT} \
-#   2>&1 | tee -a ${SAVE_ROOT}/calql_${ENV_ID}_seed${SEED}.log
+echo "[GPU ${GPU_ID}] CALQL (REDQ10, UTD=4) pretrain+online for ${ENV_ID}"
+python3 finetune.py \
+  --agent calql \
+  --config experiments/configs/train_config.py:antmaze_cql \
+  --env ${ENV_ID} \
+  --seed ${SEED} \
+  --use_redq True \
+  --utd 4 \
+  --reward_scale ${R_SCALE} \
+  --reward_bias ${R_BIAS} \
+  --num_offline_steps 1000000 \
+  --save_interval 100000 \
+  --exp_name calql_ensemble_highutd \
+  --save_dir ${SAVE_ROOT} \
+  2>&1 | tee -a ${SAVE_ROOT}/calql_${ENV_ID}_seed${SEED}.log
 
 EXP_DESC="calql_ensemble_highutd_${ENV_ID}_calql_seed${SEED}"
 RUN_DIR=$(ls -1dt ${SAVE_ROOT}/${PROJECT_DIR}/${EXP_DESC}_* | head -n 1)
 CKPT_PATH="${RUN_DIR}/checkpoint_1000000"
 echo "[GPU ${GPU_ID}] Using checkpoint: ${CKPT_PATH}"
 
-# echo "[GPU ${GPU_ID}] WSRL (SAC) from CALQL-1M for ${ENV_ID}"
-# python3 finetune.py \
-#   --agent sac \
-#   --config experiments/configs/train_config.py:antmaze_wsrl \
-#   --env ${ENV_ID} \
-#   --seed ${SEED} \
-#   --reward_scale ${R_SCALE} \
-#   --reward_bias ${R_BIAS} \
-#   --resume_path ${CKPT_PATH} \
-#   --num_offline_steps 1000000 \
-#   --use_redq True \
-#   --utd 4 \
-#   --batch_size 1024 \
-#   --warmup_steps 5000 \
-#   --exp_name wsrl \
-#   --save_dir ${SAVE_ROOT} | cat
+echo "[GPU ${GPU_ID}] WSRL (SAC) from CALQL-1M for ${ENV_ID}"
+python3 finetune.py \
+  --agent sac \
+  --config experiments/configs/train_config.py:antmaze_wsrl \
+  --env ${ENV_ID} \
+  --seed ${SEED} \
+  --reward_scale ${R_SCALE} \
+  --reward_bias ${R_BIAS} \
+  --resume_path ${CKPT_PATH} \
+  --num_offline_steps 1000000 \
+  --use_redq True \
+  --utd 4 \
+  --batch_size 1024 \
+  --warmup_steps 5000 \
+  --exp_name wsrl \
+  --save_dir ${SAVE_ROOT} | cat
 
 
 
-# echo "[GPU ${GPU_ID}] WSRL (SAC) from CALQL-1M for ${ENV_ID}"
-# python3 finetune.py \
-#   --agent sac \
-#   --config experiments/configs/train_config.py:antmaze_wsrl \
-#   --env ${ENV_ID} \
-#   --seed ${SEED} \
-#   --reward_scale ${R_SCALE} \
-#   --reward_bias ${R_BIAS} \
-#   --resume_path ${CKPT_PATH} \
-#   --num_offline_steps 1000000 \
-#   --use_redq True \
-#   --utd 4 \
-#   --batch_size 1024 \
-#   --warmup_steps 0 \
-#   --exp_name sac \
-#   --save_dir ${SAVE_ROOT} | cat
+echo "[GPU ${GPU_ID}] WSRL (SAC) from CALQL-1M for ${ENV_ID}"
+python3 finetune.py \
+  --agent sac \
+  --config experiments/configs/train_config.py:antmaze_wsrl \
+  --env ${ENV_ID} \
+  --seed ${SEED} \
+  --reward_scale ${R_SCALE} \
+  --reward_bias ${R_BIAS} \
+  --resume_path ${CKPT_PATH} \
+  --num_offline_steps 1000000 \
+  --use_redq True \
+  --utd 4 \
+  --batch_size 1024 \
+  --warmup_steps 0 \
+  --exp_name sac \
+  --save_dir ${SAVE_ROOT} | cat
 
-# echo "[GPU ${GPU_ID}] WSRL (SAC-BC) from CALQL-1M for ${ENV_ID}"
-# python3 finetune.py \
-#   --agent sac_bc \
-#   --config experiments/configs/train_config.py:antmaze_wsrl \
-#   --env ${ENV_ID} \
-#   --seed ${SEED} \
-#   --reward_scale ${R_SCALE} \
-#   --reward_bias ${R_BIAS} \
-#   --resume_path ${CKPT_PATH} \
-#   --num_offline_steps 1000000 \
-#   --use_redq True \
-#   --utd 4 \
-#   --batch_size 1024 \
-#   --warmup_steps 5000 \
-#   --config.agent_kwargs.bc_loss_weight=1.0 \
-#   --config.agent_kwargs.bc_mode=actor_target \
-#   --config.agent_kwargs.bc_teacher_eval_mode=True \
-#   --config.agent_kwargs.bc_td_weight_enabled=True \
-#   --config.agent_kwargs.bc_td_weight_normalize=True \
-#   --config.agent_kwargs.bc_td_weight_clip=10.0 \
-#   --exp_name wsrl_sacbc \
-#   --save_dir ${SAVE_ROOT} | cat
+
 
 # echo "[GPU ${GPU_ID}] Closed-Loop SAC from CALQL-1M for ${ENV_ID}"
 # python3 finetune.py \
@@ -172,8 +151,8 @@ python3 finetune.py \
   --config.agent_kwargs.bc_loss_weight=1.0 \
   --config.agent_kwargs.bc_target=${CKPT_PATH} \
   --config.agent_kwargs.bc_teacher_deterministic=False \
-  --config.agent_kwargs.bc_td_weight_enabled=False \
-  --config.agent_kwargs.bc_td_weight_clip=5.0 \
+  --config.agent_kwargs.bc_td_weight_enabled=True \
+  --config.agent_kwargs.bc_td_weight_clip=10.0 \
   --config.agent_kwargs.bc_td_weight_scale=1 \
   --config.agent_kwargs.bc_td_weight_power=2.0 \
   --config.agent_kwargs.bc_online_enable_for_steps=-1 \

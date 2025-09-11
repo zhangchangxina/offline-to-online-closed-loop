@@ -76,6 +76,9 @@ def get_config(updates=None):
     # Use a float sentinel for CLI override compatibility; <=0 means "disabled"
     config.bc_td_weight_clip = -1.0
     config.bc_td_weight_normalize = False  # If True, divide weights by mean
+    # Optional: inverse mapping (only meaningful when bc_target=="dataset")
+    config.bc_td_weight_inverse = False  # If True, weights = 1/(|delta|+eps)
+    config.bc_td_weight_inverse_eps = 1e-3
 
     if updates is not None:
         config.update(ConfigDict(updates).copy_and_resolve_references())

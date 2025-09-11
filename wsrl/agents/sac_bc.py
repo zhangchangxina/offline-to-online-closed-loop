@@ -148,7 +148,12 @@ class SACBCWithTargetAgent(SACAgent):
         online_start_val = jnp.asarray(int(self.config.get("bc_online_start_step", -1)), dtype=jnp.int32)
         online_for_val = jnp.asarray(int(self.config.get("bc_online_enable_for_steps", -1)), dtype=jnp.int32)
 
-        within_online_window = (online_start_val >= 0) & (online_for_val > 0) & ((step - online_start_val) <= online_for_val)
+        within_online_window = (
+            (online_start_val >= 0)
+            & (online_for_val > 0)
+            & (step >= online_start_val)
+            & (step < (online_start_val + online_for_val))
+        )
         bc_enabled_bool = (bc_weight > 0.0) & within_online_window
         bc_mask = bc_enabled_bool.astype(jnp.float32)
 
@@ -198,19 +203,21 @@ class SACBCWithTargetAgent(SACAgent):
                 # Number of candidates (default 10)
                 n_candidates = int(self.config.get("bc_teacher_n_candidates", 10))
                 n_candidates = max(1, n_candidates)
-                rng, teacher_sample_rng = jax.random.split(rng)
+                rng, teacher_sample_rng, critic_rng_teacher = jax.random.split(rng, 3)
                 cand_actions = teacher_dist.sample(seed=teacher_sample_rng, sample_shape=(n_candidates,))
                 # cand_actions: (n, batch, act_dim) -> (batch, n, act_dim)
                 cand_actions = jnp.transpose(cand_actions, (1, 0, 2))
                 # Evaluate target critic Q(s, a) for all candidates; result: (ensemble, batch, n)
                 qs_cand = self.forward_target_critic(
-                    batch["observations"], cand_actions, rng=critic_rng
+                    batch["observations"], cand_actions, rng=critic_rng_teacher
                 )
                 # Min over ensemble, then argmax over candidates
                 q_min = qs_cand.min(axis=0)  # (batch, n)
                 best_idx = jnp.argmax(q_min, axis=-1)  # (batch,)
                 best_idx_exp = jnp.expand_dims(best_idx, axis=-1)
                 teacher_actions = jnp.take_along_axis(cand_actions, best_idx_exp[..., None], axis=1).squeeze(axis=1)
+            # Stabilize: keep teacher actions within valid bounds
+            teacher_actions = jnp.clip(teacher_actions, -0.99, 0.99)
             # Per-sample negative log-likelihood under current policy
             bc_per = -action_distributions.log_prob(teacher_actions)
         else:
@@ -233,6 +240,10 @@ class SACBCWithTargetAgent(SACAgent):
             clip_val = float(self.config.get("bc_td_weight_clip", -1.0))
 
             weights = jnp.abs(q_delta) if use_abs else q_delta
+            # Optional inverse mapping for dataset BC target: smaller |delta| -> larger weight
+            if bool(self.config.get("bc_td_weight_inverse", False)) and (bc_mode != "actor_target"):
+                eps = float(self.config.get("bc_td_weight_inverse_eps", 1e-3))
+                weights = 1.0 / (jnp.abs(q_delta) + eps)
             if power != 1.0:
                 weights = jnp.power(weights, power)
             if clip_val > 0.0:
@@ -241,6 +252,10 @@ class SACBCWithTargetAgent(SACAgent):
                 weights = weights / (jnp.mean(weights) + 1e-8)
             if scale != 1.0:
                 weights = weights * scale
+            # Final safety clip with a reasonable default cap
+            weights = jnp.clip(
+                weights, 0.0, float(self.config.get("bc_td_weight_clip", 3.0))
+            )
             weights = jax.lax.stop_gradient(weights)
 
             bc_loss = jnp.mean(weights * bc_per)
@@ -251,7 +266,8 @@ class SACBCWithTargetAgent(SACAgent):
         # Combine with original SAC actor loss using a mask so it's traceable
         combine_mode = self.config.get("bc_combine_mode", "sum")  # "sum" | "interpolate"
         if combine_mode == "interpolate":
-            actor_loss = actor_loss * (1.0 - bc_weight * bc_mask) + bc_loss * (bc_weight * bc_mask)
+            mix = jnp.clip(bc_weight * bc_mask, 0.0, 1.0)
+            actor_loss = actor_loss * (1.0 - mix) + bc_loss * mix
         else:
             actor_loss = actor_loss + (bc_weight * bc_loss * bc_mask)
 
@@ -263,6 +279,10 @@ class SACBCWithTargetAgent(SACAgent):
         info["bc_target_code"] = jnp.asarray({"dataset":0, "actor_target":1, "offline_checkpoint":2}.get(bc_target, 0), dtype=jnp.int32)
         info["actor_loss"] = actor_loss
         info["bc_enabled"] = bc_enabled_bool.astype(jnp.int32)
+        # Reduce logging payload to scalars for performance
+        info["log_probs_mean"] = log_probs.mean()
+        info.pop("log_probs", None)
+        info.pop("actions", None)
 
         return actor_loss, info
 
