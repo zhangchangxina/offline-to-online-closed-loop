@@ -9,6 +9,7 @@ import flax.linen as nn
 from functools import partial
 from typing import Optional, Tuple, Union
 
+from absl import flags
 from wsrl.agents.sac import SACAgent
 from wsrl.common.common import JaxRLTrainState, ModuleDict, nonpytree_field
 from wsrl.common.optimizers import make_optimizer
@@ -16,6 +17,8 @@ from wsrl.common.typing import Batch, Data, Params, PRNGKey
 from wsrl.networks.actor_critic_nets import Critic, Policy, ensemblize
 from wsrl.networks.lagrange import GeqLagrangeMultiplier, LeqLagrangeMultiplier
 from wsrl.networks.mlp import MLP
+
+FLAGS = flags.FLAGS
 
 
 class SACBCWithTargetAgent(SACAgent):
@@ -28,8 +31,8 @@ class SACBCWithTargetAgent(SACAgent):
       coefficient to weight the BC term.
 
     Configuration keys (all optional):
-      - bc_loss_weight: float > 0 enables BC term
-      - bc_mode: "dataset" | "actor_target" (default: "dataset")
+      - bc_lambda_init: float >= 0, initial global BC coefficient (also used in fixed/linear)
+      - bc_target: "dataset" | "actor_target" | "offline_checkpoint" | <ckpt_path>
       - bc_teacher_deterministic: bool, use teacher mode() if True else sample()
       - bc_td_weight_enabled: bool, enable TD-based per-sample weighting
       - bc_td_weight_abs: bool, use |q_delta| if True else q_delta (default: True)
@@ -173,46 +176,62 @@ class SACBCWithTargetAgent(SACAgent):
         # Optional BC regularization (supports dataset or actor_target as teacher, and TD-weighted coefficient)
         # Online-only gating in a JAX-traceable way
         bc_lambda_schedule = self.config.get("bc_lambda_schedule", "fixed")
+        # Unify BC activation to outer (environment) steps
+        start_val = jnp.asarray(int(FLAGS.num_offline_steps), dtype=jnp.int32)
+        steps_val = jnp.asarray(int(self.config["bc_steps"]), dtype=jnp.int32)
+        # Map inner optimizer steps to outer env steps:
+        # - Offline phase: 1 inner step per env step
+        # - Online phase: (utd>1) => (utd + 1) inner steps per env step; else 1
+        offline_end = jnp.asarray(int(FLAGS.num_offline_steps), dtype=jnp.int32)
+        inner_step = self.state.step.astype(jnp.int32)
+        utd_val = jnp.asarray(int(FLAGS.utd), dtype=jnp.int32)
+        utd_effective = jnp.where(utd_val > 1, utd_val + 1, jnp.asarray(1, dtype=jnp.int32))
+        outer_step = jnp.minimum(inner_step, offline_end) + jnp.maximum(inner_step - offline_end, 0) // utd_effective
         if bc_lambda_schedule == "adaptive":
             # Use Lagrange multiplier as dynamic coefficient (clamped to >= 0)
-            bc_weight = jnp.maximum(0.0, jnp.asarray(self.forward_bc_lagrange(), dtype=jnp.float32))
+            bc_lambda = jnp.maximum(0.0, jnp.asarray(self.forward_bc_lagrange(), dtype=jnp.float32))
+        elif bc_lambda_schedule == "external":
+            # Externally provided lambda via config, updated by trainer based on J-drop
+            bc_lambda = jnp.asarray(float(self.config.get("bc_lambda_external", self.config.get("bc_lambda_init", 0.0))), dtype=jnp.float32)
+        elif bc_lambda_schedule == "linear":
+            # Linearly decay from initial bc_loss_weight to 0 over steps (after start)
+            lam_init = jnp.maximum(0.0, jnp.asarray(float(self.config["bc_lambda_init"]), dtype=jnp.float32))
+            eff_step = jnp.maximum(outer_step - start_val, 0)
+            steps_safe = jnp.maximum(steps_val, jnp.asarray(1, dtype=jnp.int32))
+            progress = jnp.clip(eff_step.astype(jnp.float32) / steps_safe.astype(jnp.float32), 0.0, 1.0)
+            bc_lambda = lam_init * (1.0 - progress)
+        elif bc_lambda_schedule in ("exp", "exp_decay", "fast_slow"):
+            # Exponential decay: fast early drop, slow later approach to zero
+            lam_init = jnp.maximum(0.0, jnp.asarray(float(self.config["bc_lambda_init"]), dtype=jnp.float32))
+            eff_step = jnp.maximum(outer_step - start_val, 0)
+            steps_safe = jnp.maximum(steps_val, jnp.asarray(1, dtype=jnp.int32))
+            progress = jnp.clip(eff_step.astype(jnp.float32) / steps_safe.astype(jnp.float32), 0.0, 1.0)
+            decay_rate = jnp.asarray(float(self.config.get("bc_lambda_exp_rate", 5.0)), dtype=jnp.float32)
+            bc_lambda = lam_init * jnp.exp(-decay_rate * progress)
         else:
-            bc_weight = jnp.asarray(float(self.config.get("bc_loss_weight", 0.0)), dtype=jnp.float32)
-        step = self.state.step.astype(jnp.int32)
-        online_start_val = jnp.asarray(int(self.config.get("bc_online_start_step", -1)), dtype=jnp.int32)
-        online_for_val = jnp.asarray(int(self.config.get("bc_online_enable_for_steps", -1)), dtype=jnp.int32)
+            bc_lambda = jnp.asarray(float(self.config["bc_lambda_init"]), dtype=jnp.float32)
 
+        # Optional upper bound on lambda (applies to all schedules)
+        lam_max = float(self.config.get("bc_lambda_max", 2.0))
+        if lam_max > 0.0:
+            bc_lambda = jnp.minimum(bc_lambda, jnp.asarray(lam_max, dtype=jnp.float32))
+        step = outer_step
+        # Gate window (in outer steps): start = num_offline_steps + warmup_steps; length = bc_steps
+        
         # Online gating semantics (simplified):
-        # len == 0 -> off; len > 0 -> [start, start+len); len == -1 -> [start, +∞)
-        start_ok = (online_start_val >= 0)
-        after_start = (step >= online_start_val)
-        in_window = (online_for_val == jnp.asarray(-1, dtype=jnp.int32)) | (
-            (online_for_val > 0) & (step < (online_start_val + online_for_val))
-        )
-        bc_enabled_bool = (bc_weight > 0.0) & start_ok & after_start & in_window
+        # len > 0 -> [start, start+len)
+        bc_enabled_bool = (step >= start_val) & (step < (start_val + steps_val))
         bc_mask = bc_enabled_bool.astype(jnp.float32)
 
-        # Resolve BC target (unified key bc_target preferred; fallback to bc_mode + bc_teacher_source)
+        # Resolve BC target via unified key bc_target only
         bc_target_cfg = self.config.get("bc_target", None)
         allowed_targets = ("dataset", "actor_target", "offline_checkpoint")
-        if bc_target_cfg is None:
-            # legacy fallback
-            legacy_mode = self.config.get("bc_mode", "dataset")
-            legacy_src = self.config.get("bc_teacher_source", "actor_target")
-            if legacy_mode == "dataset":
-                bc_target = "dataset"
-            else:
-                bc_target = "offline_checkpoint" if legacy_src == "offline_checkpoint" else "actor_target"
+        if isinstance(bc_target_cfg, str):
+            bc_target = bc_target_cfg if (bc_target_cfg in allowed_targets) else "offline_checkpoint"
         else:
-            # unified path: if not in allowed set, treat as path => offline_checkpoint
-            if isinstance(bc_target_cfg, str) and (bc_target_cfg not in allowed_targets):
-                bc_target = "offline_checkpoint"
-            else:
-                bc_target = bc_target_cfg
+            bc_target = "dataset"
 
-        bc_mode = "dataset" if bc_target == "dataset" else "actor_target"
-
-        if bc_mode == "actor_target":
+        if bc_target != "dataset":
             # Teacher: target actor (slowly updated via target_params)
             teacher_eval_mode = bool(self.config.get("bc_teacher_eval_mode", True))
             teacher_source = (
@@ -294,10 +313,10 @@ class SACBCWithTargetAgent(SACAgent):
             elif action_src == "dataset":
                 eval_actions = jnp.clip(batch["actions"], -0.99, 0.99)
             elif action_src == "teacher":
-                eval_actions = teacher_actions if (bc_mode == "actor_target") else jnp.clip(batch["actions"], -0.99, 0.99)
+                eval_actions = teacher_actions if (bc_target != "dataset") else jnp.clip(batch["actions"], -0.99, 0.99)
             else:
                 # default: match BC target
-                eval_actions = teacher_actions if (bc_mode == "actor_target") else jnp.clip(batch["actions"], -0.99, 0.99)
+                eval_actions = teacher_actions if (bc_target != "dataset") else jnp.clip(batch["actions"], -0.99, 0.99)
             # If uncertainty path needed, get ensemble Q(s,a)
             if (mode == "uncert") or (mode == "uncert_inverse"):
                 q_src = str(self.config.get("bc_uncert_q_source", "target"))
@@ -336,7 +355,7 @@ class SACBCWithTargetAgent(SACAgent):
             q_source = self.config.get("bc_uncert_q_source", "target")
             use_target = (q_source == "target")
             # Choose actions to evaluate uncertainty on (match BC target)
-            eval_actions = teacher_actions if (bc_mode == "actor_target") else jnp.clip(batch["actions"], -0.99, 0.99)
+            eval_actions = teacher_actions if (bc_target != "dataset") else jnp.clip(batch["actions"], -0.99, 0.99)
             # Evaluate ensemble Q(s,a): shape (ensemble, batch)
             if use_target:
                 qs_eval = self.forward_target_critic(batch["observations"], eval_actions, rng=critic_rng)
@@ -373,10 +392,10 @@ class SACBCWithTargetAgent(SACAgent):
         # Combine with original SAC actor loss using a mask so it's traceable
         combine_mode = self.config.get("bc_combine_mode", "sum")  # "sum" | "interpolate"
         if combine_mode == "interpolate":
-            mix = jnp.clip(bc_weight * bc_mask, 0.0, 1.0)
+            mix = jnp.clip(bc_lambda * bc_mask, 0.0, 1.0)
             actor_loss = actor_loss * (1.0 - mix) + bc_loss * mix
         else:
-            actor_loss = actor_loss + (bc_weight * bc_loss * bc_mask)
+            actor_loss = actor_loss + (bc_lambda * bc_loss * bc_mask)
 
         # Log diagnostics (mask bc_loss so it's 0 outside the online window)
         info["bc_loss"] = bc_loss
@@ -385,13 +404,10 @@ class SACBCWithTargetAgent(SACAgent):
         info["bc_weight_std"] = weights.std()
         info["bc_weight_max"] = weights.max()
         info["bc_weight_min"] = weights.min()
-        info["bc_mode_code"] = jnp.asarray(1 if bc_mode == "actor_target" else 0, dtype=jnp.int32)
         info["bc_target_code"] = jnp.asarray({"dataset":0, "actor_target":1, "offline_checkpoint":2}.get(bc_target, 0), dtype=jnp.int32)
         info["actor_loss"] = actor_loss
-        info["bc_enabled"] = bc_enabled_bool.astype(jnp.int32)
         info["bc_mask"] = bc_mask
-        if bc_lambda_schedule == "adaptive":
-            info["bc_lambda"] = bc_weight
+        info["bc_lambda"] = bc_lambda
         # Reduce logging payload to scalars for performance
         info["log_probs_mean"] = log_probs.mean()
         info.pop("log_probs", None)
@@ -417,25 +433,15 @@ class SACBCWithTargetAgent(SACAgent):
             batch["observations"], rng=policy_rng, grad_params=policy_grad_params
         )
 
-        # Resolve BC target (reuse the exact logic)
+        # Resolve BC target via unified key bc_target only
         bc_target_cfg = self.config.get("bc_target", None)
         allowed_targets = ("dataset", "actor_target", "offline_checkpoint")
-        if bc_target_cfg is None:
-            legacy_mode = self.config.get("bc_mode", "dataset")
-            legacy_src = self.config.get("bc_teacher_source", "actor_target")
-            if legacy_mode == "dataset":
-                bc_target = "dataset"
-            else:
-                bc_target = "offline_checkpoint" if legacy_src == "offline_checkpoint" else "actor_target"
+        if isinstance(bc_target_cfg, str):
+            bc_target = bc_target_cfg if (bc_target_cfg in allowed_targets) else "offline_checkpoint"
         else:
-            if isinstance(bc_target_cfg, str) and (bc_target_cfg not in allowed_targets):
-                bc_target = "offline_checkpoint"
-            else:
-                bc_target = bc_target_cfg
+            bc_target = "dataset"
 
-        bc_mode = "dataset" if bc_target == "dataset" else "actor_target"
-
-        if bc_mode == "actor_target":
+        if bc_target != "dataset":
             teacher_eval_mode = bool(self.config.get("bc_teacher_eval_mode", True))
             teacher_source = (
                 "offline_checkpoint" if bc_target == "offline_checkpoint" else self.config.get("bc_teacher_source", "actor_target")
@@ -481,11 +487,7 @@ class SACBCWithTargetAgent(SACAgent):
         chex.assert_shape(bc_per, (batch_size,))
 
         # Per-sample BC weighting via unified bc_weight_mode
-        mode_raw = str(self.config.get("bc_weight_mode", "none"))
-        if mode_raw in ("pure", "pure_bc", "fixed", "uniform"):
-            mode = "none"
-        else:
-            mode = mode_raw
+        mode = str(self.config.get("bc_weight_mode", "none"))
         if mode != "none":
             action_src = str(self.config.get("bc_uncert_action_source", "bc"))
             if action_src in ("policy", "q", "pi"):
@@ -495,9 +497,9 @@ class SACBCWithTargetAgent(SACAgent):
             elif action_src == "dataset":
                 eval_actions = jnp.clip(batch["actions"], -0.99, 0.99)
             elif action_src == "teacher":
-                eval_actions = teacher_actions if (bc_mode == "actor_target") else jnp.clip(batch["actions"], -0.99, 0.99)
+                eval_actions = teacher_actions if (bc_target != "dataset") else jnp.clip(batch["actions"], -0.99, 0.99)
             else:
-                eval_actions = teacher_actions if (bc_mode == "actor_target") else jnp.clip(batch["actions"], -0.99, 0.99)
+                eval_actions = teacher_actions if (bc_target != "dataset") else jnp.clip(batch["actions"], -0.99, 0.99)
 
             if (mode == "uncert") or (mode == "uncert_inverse"):
                 q_src = str(self.config.get("bc_uncert_q_source", "target"))
@@ -533,7 +535,7 @@ class SACBCWithTargetAgent(SACAgent):
         elif bool(self.config.get("bc_uncert_weight_enabled", False)):
             q_source = self.config.get("bc_uncert_q_source", "target")
             use_target = (q_source == "target")
-            eval_actions = teacher_actions if (bc_mode == "actor_target") else jnp.clip(batch["actions"], -0.99, 0.99)
+            eval_actions = teacher_actions if (bc_target != "dataset") else jnp.clip(batch["actions"], -0.99, 0.99)
             if use_target:
                 qs_eval = self.forward_target_critic(batch["observations"], eval_actions, rng=critic_rng)
             else:
@@ -577,6 +579,57 @@ class SACBCWithTargetAgent(SACAgent):
         mode = str(self.config.get("bc_constraint_mode", "bc_loss"))
         bc_constraint = jnp.asarray(self.config.get("bc_constraint", 0.1), dtype=jnp.float32)
 
+        if mode == "j_drop":
+            # Constraint on performance drop J_drop. Supports absolute or relative metric.
+            baseline = self.config.get("perf_baseline_return", None)
+            ewma = self.config.get("perf_ewma_return", None)
+            if (baseline is None) or (ewma is None):
+                # No-op until trainer provides metrics
+                return 0.0, {"bc_lagrange_loss": 0.0}
+
+            # Compute J_drop per metric
+            jdrop_metric = str(self.config.get("bc_jdrop_metric", self.config.get("bc_drop_metric", "absolute")))
+            rel_eps = jnp.asarray(
+                float(self.config.get("bc_jdrop_rel_eps", self.config.get("bc_drop_rel_eps", 1e-6))),
+                dtype=jnp.float32,
+            )
+            baseline_val = jnp.asarray(float(baseline), dtype=jnp.float32)
+            ewma_val = jnp.asarray(float(ewma), dtype=jnp.float32)
+            raw_drop = baseline_val - ewma_val
+            if jdrop_metric in ("relative", "percent", "percentage"):
+                j_drop = raw_drop / (jnp.abs(baseline_val) + rel_eps)
+            else:
+                j_drop = raw_drop
+            j_drop = jnp.maximum(j_drop, 0.0)
+
+            lhs_value = jax.lax.stop_gradient(j_drop)
+            bc_constraint_eff = jax.lax.stop_gradient(bc_constraint)
+
+            constraint_violation = lhs_value - bc_constraint_eff
+            positive_violation = jnp.maximum(constraint_violation, 0.0)
+            positive_violation = jax.lax.stop_gradient(positive_violation)
+
+            bc_penalty = self.state.apply_fn(
+                {"params": params},
+                lhs=positive_violation,
+                rhs=jnp.zeros_like(positive_violation),
+                name="bc_lagrange",
+            )
+
+            lambda_value = self.forward_bc_lagrange(grad_params=params)
+            complementarity = lambda_value * positive_violation
+            info = {
+                "bc_lagrange_loss": bc_penalty,
+                "j_drop": lhs_value,
+                "j_drop_metric": jdrop_metric,
+                "bc_constraint_jdrop": bc_constraint_eff,
+                "bc_violation": constraint_violation,
+                "bc_positive_violation": positive_violation,
+                "bc_lambda": lambda_value,
+                "bc_kkt_residual": jnp.abs(complementarity),
+            }
+            return bc_penalty, info
+
         if mode == "q_drop":
             # Constraint on average positive Q drop relative to a reference action
             batch_size = batch["rewards"].shape[0]
@@ -590,26 +643,20 @@ class SACBCWithTargetAgent(SACAgent):
             chex.assert_shape(q_pi, (batch_size,))
 
             # Reference actions: dataset or teacher (matching bc_target unless overridden)
+            # Resolve reference mode with a single concise rule set
+            allowed_targets = ("dataset", "actor_target", "offline_checkpoint")
             ref_src = self.config.get("bc_qdrop_reference", None)
-            if ref_src is None:
-                bc_target_cfg = self.config.get("bc_target", None)
-                allowed_targets = ("dataset", "actor_target", "offline_checkpoint")
-                if bc_target_cfg is None:
-                    legacy_mode = self.config.get("bc_mode", "dataset")
-                    legacy_src = self.config.get("bc_teacher_source", "actor_target")
-                    if legacy_mode == "dataset":
-                        ref_mode = "dataset"
-                    else:
-                        ref_mode = "offline_checkpoint" if legacy_src == "offline_checkpoint" else "actor_target"
-                else:
-                    if isinstance(bc_target_cfg, str) and (bc_target_cfg not in allowed_targets):
-                        ref_mode = "offline_checkpoint"
-                    else:
-                        ref_mode = bc_target_cfg
+            if isinstance(ref_src, str) and (ref_src in allowed_targets):
+                ref_mode = ref_src
             else:
-                ref_mode = "dataset" if ref_src == "dataset" else "actor_target"
+                bc_target_cfg = self.config.get("bc_target", None)
+                ref_mode = (
+                    bc_target_cfg
+                    if isinstance(bc_target_cfg, str) and (bc_target_cfg in allowed_targets)
+                    else "dataset"
+                )
 
-            if ref_mode == "actor_target":
+            if ref_mode in ("actor_target", "offline_checkpoint"):
                 teacher_eval_mode = bool(self.config.get("bc_teacher_eval_mode", True))
                 teacher_source = (
                     "offline_checkpoint" if ref_mode == "offline_checkpoint" else self.config.get("bc_teacher_source", "actor_target")
@@ -621,21 +668,58 @@ class SACBCWithTargetAgent(SACAgent):
                 teacher_dist = self.forward_policy(
                     batch["observations"], rng=ref_rng, grad_params=teacher_params, train=not teacher_eval_mode
                 )
-                ref_actions = teacher_dist.mode() if bool(self.config.get("bc_teacher_deterministic", True)) else teacher_dist.sample(seed=ref_rng)
+                if bool(self.config.get("bc_teacher_deterministic", True)):
+                    ref_actions = teacher_dist.mode()
+                else:
+                    # Use a fresh RNG key for sampling to avoid correlation with forward rng
+                    ref_rng, ref_sample_rng = jax.random.split(ref_rng)
+                    ref_actions = teacher_dist.sample(seed=ref_sample_rng)
             else:
                 ref_actions = jnp.clip(batch["actions"], -0.99, 0.99)
 
             ref_actions = jnp.clip(ref_actions, -0.99, 0.99)
-            qs_ref = self.forward_target_critic(batch["observations"], ref_actions, rng=q_ref_rng)
+            qs_ref = self.forward_critic(batch["observations"], ref_actions, rng=q_ref_rng)
             q_ref = qs_ref.min(axis=0)
             chex.assert_shape(q_ref, (batch_size,))
 
-            # Positive Q drop
-            q_drop = jnp.maximum(q_ref - q_pi, 0.0)
-            lhs_value = jnp.mean(q_drop)
+            # Positive Q drop (supports absolute or relative/percentage drop)
+            # bc_qdrop_metric: "absolute" | "relative" (aliases: "percent", "percentage")
+            q_drop_metric = str(self.config.get("bc_qdrop_metric", self.config.get("bc_drop_metric", "absolute")))
+            rel_eps = jnp.asarray(
+                float(self.config.get("bc_qdrop_rel_eps", self.config.get("bc_drop_rel_eps", 1e-6))),
+                dtype=jnp.float32,
+            )
+            q_drop_raw = q_ref - q_pi
+            if q_drop_metric in ("relative", "percent", "percentage"):
+                # Relative drop: (Q_ref - Q_pi) / (|Q_ref| + eps)
+                q_drop = q_drop_raw / (jnp.abs(q_ref) + rel_eps)
+            else:
+                # Absolute drop in Q units
+                q_drop = q_drop_raw
+            # Optionally adapt the constraint to the batch scale
+            adapt_mode = str(self.config.get("bc_qdrop_adaptive_mode", "none"))
+            if adapt_mode == "batch_quantile":
+                q = float(self.config.get("bc_qdrop_quantile", 0.9))
+                q = jnp.clip(jnp.asarray(q, dtype=jnp.float32), 0.0, 1.0)
+                # compute per-batch quantile; simple linear interpolation via jnp.quantile
+                bc_constraint_eff = jnp.quantile(q_drop, q)
+            elif adapt_mode == "batch_normalized":
+                norm_c = jnp.asarray(float(self.config.get("bc_qdrop_norm_c", 0.5)), dtype=jnp.float32)
+                eps = jnp.asarray(float(self.config.get("bc_qdrop_eps", 1e-6)), dtype=jnp.float32)
+                mean = jnp.mean(q_drop)
+                std = jnp.std(q_drop)
+                bc_constraint_eff = mean + norm_c * jnp.maximum(std, eps)
+            else:
+                bc_constraint_eff = bc_constraint
 
-            constraint_violation = lhs_value - bc_constraint
+            lhs_value = jnp.mean(q_drop)
+            # Stop gradients so the Lagrange update does not backprop into actor/critic
+            lhs_value = jax.lax.stop_gradient(lhs_value)
+            bc_constraint_eff = jax.lax.stop_gradient(bc_constraint_eff)
+
+            constraint_violation = lhs_value - bc_constraint_eff
             positive_violation = jnp.maximum(constraint_violation, 0.0)
+            positive_violation = jax.lax.stop_gradient(positive_violation)
 
             bc_penalty = self.state.apply_fn(
                 {"params": params},
@@ -647,15 +731,18 @@ class SACBCWithTargetAgent(SACAgent):
             lambda_value = self.forward_bc_lagrange(grad_params=params)
             complementarity = lambda_value * positive_violation
             info = {
+                "bc_qdrop_mean": lhs_value,
+                "bc_qdrop_max": jnp.max(q_drop),
+                "bc_qdrop_min": jnp.min(q_drop),
                 "bc_lagrange_loss": bc_penalty,
-                "bc_constraint_lhs": lhs_value,
-                "bc_constraint_rhs": bc_constraint,
+                "bc_constraint_qdrop": bc_constraint_eff,
                 "bc_violation": constraint_violation,
+                "bc_violation_norm": jnp.abs(constraint_violation),
                 "bc_positive_violation": positive_violation,
                 "bc_lambda": lambda_value,
+                "bc_lambda_norm": jnp.abs(lambda_value),
                 "bc_lambda_times_violation": complementarity,
                 "bc_kkt_residual": jnp.abs(complementarity),
-                "bc_qdrop_ref_code": jnp.asarray(0 if ref_mode == "dataset" else 1, dtype=jnp.int32),
             }
         else:
             # Default: constraint on BC loss magnitude
@@ -677,8 +764,10 @@ class SACBCWithTargetAgent(SACAgent):
                 "bc_constraint_lhs": bc_loss_value,
                 "bc_constraint_rhs": bc_constraint,
                 "bc_violation": constraint_violation,
+                "bc_violation_norm": jnp.abs(constraint_violation),
                 "bc_positive_violation": positive_violation,
                 "bc_lambda": lambda_value,
+                "bc_lambda_norm": jnp.abs(lambda_value),
                 "bc_lambda_times_violation": complementarity,
                 "bc_kkt_residual": jnp.abs(complementarity),
             }
@@ -741,6 +830,73 @@ class SACBCWithTargetAgent(SACAgent):
                 info[f"{name}_lr"] = opt_state.hyperparams["learning_rate"]
 
         return self.replace(state=new_state), info
+
+    @partial(jax.jit, static_argnames=("utd_ratio", "pmap_axis"))
+    def update_high_utd(
+        self,
+        batch: Batch,
+        *,
+        utd_ratio: int,
+        pmap_axis: Optional[str] = None,
+    ) -> Tuple["SACBCWithTargetAgent", dict]:
+        """
+        High-UTD updates with optional bc_lagrange update on the final step when adaptive schedule is enabled.
+
+        - Perform `utd_ratio` critic-only updates on minibatches.
+        - Then one joint update for actor/temperature and, if adaptive, bc_lagrange.
+        """
+        batch_size = batch["rewards"].shape[0]
+        assert (
+            batch_size % utd_ratio == 0
+        ), f"Batch size {batch_size} must be divisible by UTD ratio {utd_ratio}"
+        minibatch_size = batch_size // utd_ratio
+        chex.assert_tree_shape_prefix(batch, (batch_size,))
+
+        def scan_body(carry: Tuple[SACBCWithTargetAgent], data: Tuple[Batch]):
+            (agent,) = carry
+            (minibatch,) = data
+            agent, info = agent.update(
+                minibatch,
+                pmap_axis=pmap_axis,
+                networks_to_update=frozenset({"critic"}),
+            )
+            return (agent,), info
+
+        def make_minibatch(data: jnp.ndarray):
+            return jnp.reshape(data, (utd_ratio, minibatch_size) + data.shape[1:])
+
+        minibatches = jax.tree_util.tree_map(make_minibatch, batch)
+
+        (agent,), critic_infos = jax.lax.scan(scan_body, (self,), (minibatches,))
+
+        critic_infos = jax.tree_util.tree_map(lambda x: jnp.mean(x, axis=0), critic_infos)
+        # Remove placeholders for non-updated networks during critic-only phase (if present)
+        for k in ("actor", "temperature", "bc_lagrange"):
+            try:
+                del critic_infos[k]
+            except Exception:
+                pass
+
+        # Final joint update: actor/temperature (+ bc_lagrange if adaptive schedule)
+        final_networks = (
+            frozenset({"actor", "temperature", "bc_lagrange"})
+            if self.config.get("bc_lambda_schedule", "fixed") == "adaptive"
+            else frozenset({"actor", "temperature"})
+        )
+
+        agent, actor_temp_infos = agent.update(
+            batch,
+            pmap_axis=pmap_axis,
+            networks_to_update=final_networks,
+        )
+        # Remove critic entry from actor/temp infos
+        try:
+            del actor_temp_infos["critic"]
+        except Exception:
+            pass
+
+        infos = {**critic_infos, **actor_temp_infos}
+        return agent, infos
 
     @classmethod
     def create(
@@ -816,8 +972,8 @@ class SACBCWithTargetAgent(SACAgent):
         # Optionally include bc_lagrange module when schedule is adaptive
         need_bc_module = (bc_lambda_schedule == "adaptive")
         if need_bc_module:
-            # Initialize from provided bc_loss_weight if available
-            init_val = float(kwargs.get("bc_loss_weight", 0.0))
+            # Initialize from provided bc_lambda_init
+            init_val = float(kwargs["bc_lambda_init"])  # must be provided
             init_val = max(0.0, init_val)
             bc_lagrange_def = LeqLagrangeMultiplier(
                 init_value=init_val if init_val > 0.0 else 1.0,
@@ -842,6 +998,14 @@ class SACBCWithTargetAgent(SACAgent):
             "temperature": make_optimizer(**kwargs.get("temperature_optimizer_kwargs", {"learning_rate": 3e-4})),
         }
         if need_bc_module:
+            # Allow unified alias bc_lagrangian_lr to override Lagrange optimizer lr
+            eff_lr = kwargs.get("bc_lagrangian_lr", None)
+            if eff_lr is not None:
+                try:
+                    eff_lr = float(eff_lr)
+                    bc_lagrange_optimizer_kwargs = {**bc_lagrange_optimizer_kwargs, "learning_rate": eff_lr}
+                except Exception:
+                    pass
             txs["bc_lagrange"] = make_optimizer(**bc_lagrange_optimizer_kwargs)
 
         # Initialize parameters
@@ -876,7 +1040,7 @@ class SACBCWithTargetAgent(SACAgent):
             soft_target_update_rate=kwargs.get("soft_target_update_rate", 0.005),
             target_entropy=target_entropy,
             backup_entropy=kwargs.get("backup_entropy", False),
-            bc_loss_weight=kwargs.get("bc_loss_weight", 0.0),
+            bc_lambda_init=kwargs["bc_lambda_init"],
             n_actions=kwargs.get("n_actions", 10),
             max_target_backup=kwargs.get("max_target_backup", False),
             # BC Lagrange

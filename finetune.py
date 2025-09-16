@@ -1,5 +1,6 @@
 import os
 from functools import partial
+from collections import deque
 
 import gym
 import jax
@@ -330,6 +331,17 @@ def main(_):
     is_online_stage = False
     observation, info = finetune_env.reset()
     done = False  # env done signal
+    # Online rollout accumulators
+    episode_return = 0.0
+    episode_length = 0
+    episode_success = None  # 1.0 for success, 0.0 for failure when applicable
+    success_window = deque(maxlen=20)
+    # Baselines for J-drop
+    baseline_return_offline = None  # evaluated once at online switch
+    ewma_online_return = None
+    ewma_alpha = 0.1  # smoothing for online return
+    # External lambda (for bc_lambda_schedule="external")
+    bc_lambda_external_state = None
 
     for _ in tqdm.tqdm(range(step, FLAGS.num_offline_steps + FLAGS.num_online_steps)):
         """
@@ -367,15 +379,7 @@ def main(_):
                         "lam_eff_linear_start_step": int(agent.state.step)
                     })
 
-            # If using SAC-BC, optionally enable BC only for first N online steps
             if FLAGS.agent == "sac_bc":
-                online_bc_steps = int(FLAGS.config.agent_kwargs.get("bc_online_enable_for_steps", -1))
-                if online_bc_steps and online_bc_steps > 0:
-                    agent.update_config({
-                        "bc_online_start_step": int(agent.state.step),
-                        "bc_online_enable_for_steps": online_bc_steps,
-                    })
-
                 # Optionally load an offline checkpoint as the fixed BC teacher
                 # Support unified bc_target: if it's a path (not a known keyword), use it as teacher
                 target_cfg = FLAGS.config.agent_kwargs.get("bc_target", "")
@@ -398,6 +402,57 @@ def main(_):
                             logging.warning("Checkpoint at %s did not contain params/target_params; skipping offline teacher.", ckpt_teacher_path)
                     except Exception as e:
                         logging.warning("Failed to load offline teacher from %s: %s", ckpt_teacher_path, repr(e))
+
+                # Evaluate offline baseline performance once at switch
+                try:
+                    policy_fn = partial(agent.sample_actions, argmax=FLAGS.deterministic_eval)
+                    eval_func = partial(evaluate_with_trajectories, clip_action=FLAGS.clip_action)
+                    stats, trajs = eval_func(policy_fn, eval_env, FLAGS.n_eval_trajs)
+                    perf_source = str(FLAGS.config.agent_kwargs.get("bc_perf_source", "success"))
+                    if perf_source == "success":
+                        # success 基线：取 info 中的成功标志（各环境定义不同）
+                        if env_type == "adroit-binary":
+                            baseline_success = float(np.mean([any(d.get("goal_achieved", False) for d in t["infos"]) for t in trajs]))
+                        elif env_type == "kitchen":
+                            # 以最终阶段完成个数/4 作为成功率近似
+                            baseline_success = float(np.mean([t["rewards"][-1] for t in trajs]) / 4.0)
+                        else:
+                            # d4rl: 用 normalized return 近似成功率（[0,1] 区间）
+                            baseline_success = float(np.mean([eval_env.get_normalized_score(np.sum(t["rewards"])) for t in trajs]))
+                        wandb_logger.log({"baseline": {"offline_success": baseline_success}}, step=step)
+                        agent.update_config({"perf_baseline_success": baseline_success})
+                    else:
+                        baseline_return_offline = float(np.mean([np.sum(t["rewards"]) for t in trajs]))
+                        wandb_logger.log({"baseline": {"offline_average_return": baseline_return_offline}}, step=step)
+                        # Log offline success rate as well, for convenience
+                        if env_type == "adroit-binary":
+                            offline_success = float(np.mean([any(d.get("goal_achieved", False) for d in t["infos"]) for t in trajs]))
+                        elif env_type == "kitchen":
+                            offline_success = float(np.mean([t["rewards"][-1] for t in trajs]) / 4.0)
+                        else:
+                            offline_success = float(np.mean([eval_env.get_normalized_score(np.sum(t["rewards"])) for t in trajs]))
+                        wandb_logger.log({"baseline": {"offline_success": offline_success}}, step=step)
+                        # Provide baseline to agent for internal J_drop if using adaptive schedule with j_drop
+                        agent.update_config({
+                            "perf_baseline_return": baseline_return_offline,
+                        })
+                except Exception as e:
+                    logging.warning("Baseline evaluation failed at online switch: %s", repr(e))
+
+                # Initialize external lambda state if using external schedule in dual-ascent mode
+                if FLAGS.config.agent_kwargs.get("bc_lambda_schedule", "fixed") == "external":
+                    ext_mode = FLAGS.config.agent_kwargs.get("bc_lambda_external_mode", "proportional")
+                    if ext_mode == "dual_ascent":
+                        try:
+                            bc_lambda_external_state = float(
+                                FLAGS.config.agent_kwargs.get(
+                                    "bc_lambda_external_init",
+                                    FLAGS.config.agent_kwargs.get("bc_lambda_init", 0.0),
+                                )
+                            )
+                        except Exception:
+                            bc_lambda_external_state = 0.0
+                        wandb_logger.log({"baseline": {"external_lambda_mode": "dual_ascent", "external_lambda_init": bc_lambda_external_state}}, step=step)
 
         timer.tick("total")
 
@@ -434,9 +489,103 @@ def main(_):
                 replay_buffer.insert(transition)
 
                 observation = next_observation
+                # Update online episode stats
+                episode_return += float(reward)
+                episode_length += 1
+                # Env-specific success signal (if available)
+                if env_type == "adroit-binary":
+                    episode_success = 1.0 if info.get("goal_achieved", False) else (episode_success or 0.0)
+                elif env_type == "kitchen":
+                    # In kitchen, success is whether bonus at final step is True; track latest
+                    bonus = 1.0 if info.get("rewards", {}).get("bonus", 0.0) else 0.0
+                    episode_success = bonus
                 if done or truncated:
+                    # Log per-episode stats and rolling success rate (if defined)
+                    online_log = {
+                        "episode_return": episode_return,
+                        "episode_length": episode_length,
+                    }
+                    if episode_success is not None:
+                        success_window.append(float(episode_success))
+                        online_log["success"] = float(episode_success)
+                        if len(success_window) > 0:
+                            online_log["success_rate_window"] = float(np.mean(success_window))
+                    # Update EWMA of online returns
+                    if ewma_online_return is None:
+                        ewma_online_return = float(episode_return)
+                    else:
+                        ewma_online_return = (1 - ewma_alpha) * ewma_online_return + ewma_alpha * float(episode_return)
+                    online_log["ewma_return"] = float(ewma_online_return)
+                    # If SAC-BC and baseline available, compute J_drop (supports absolute/relative) and update lambda
+                    if FLAGS.agent == "sac_bc":
+                        perf_source = str(FLAGS.config.agent_kwargs.get("bc_perf_source", "success"))
+                        has_baseline = False
+                        if perf_source == "success":
+                            # 使用成功率的滑窗均值作为在线性能
+                            if len(success_window) > 0 and agent is not None:
+                                ewma_val = float(np.mean(success_window))
+                                baseline_val = float(agent.config.get("perf_baseline_success", None))
+                                has_baseline = baseline_val is not None
+                        else:
+                            if baseline_return_offline is not None:
+                                baseline_val = float(baseline_return_offline)
+                                ewma_val = float(ewma_online_return)
+                                has_baseline = True
+                        if not has_baseline:
+                            # 无基线则跳过
+                            wandb_logger.log({"online_rollout": {"J_drop_skipped": 1}}, step=step)
+                        else:
+                            jdrop_metric = FLAGS.config.agent_kwargs.get("bc_jdrop_metric", FLAGS.config.agent_kwargs.get("bc_drop_metric", "absolute"))
+                            rel_eps = float(FLAGS.config.agent_kwargs.get("bc_jdrop_rel_eps", FLAGS.config.agent_kwargs.get("bc_drop_rel_eps", 1e-6)))
+                            raw_drop = baseline_val - ewma_val
+                            if jdrop_metric in ("relative", "percent", "percentage"):
+                                j_drop = raw_drop / (abs(baseline_val) + rel_eps)
+                            else:
+                                j_drop = raw_drop
+                            online_log["J_drop"] = j_drop
+                            online_log["J_drop_metric"] = jdrop_metric
+                            online_log["J_drop_source"] = perf_source
+                        jdrop_metric = FLAGS.config.agent_kwargs.get("bc_jdrop_metric", FLAGS.config.agent_kwargs.get("bc_drop_metric", "absolute"))
+                        rel_eps = float(FLAGS.config.agent_kwargs.get("bc_jdrop_rel_eps", FLAGS.config.agent_kwargs.get("bc_drop_rel_eps", 1e-6)))
+                        raw_drop = baseline_val - ewma_val
+                        if jdrop_metric in ("relative", "percent", "percentage"):
+                            j_drop = raw_drop / (abs(baseline_val) + rel_eps)
+                        else:
+                            j_drop = raw_drop
+                        j_drop = max(0.0, j_drop)
+                        online_log["J_drop"] = j_drop
+                        online_log["J_drop_metric"] = jdrop_metric
+                        # Two options: external lambda or internal j_drop constraint. Prefer internal if bc_constraint_mode=j_drop & adaptive.
+                        if FLAGS.config.agent_kwargs.get("bc_constraint_mode", "bc_loss") == "j_drop" and FLAGS.config.agent_kwargs.get("bc_lambda_schedule", "fixed") == "adaptive":
+                            agent.update_config({
+                                "perf_ewma_return": float(ewma_online_return),
+                            })
+                        else:
+                            # Fallback to external control of lambda
+                            lam_max = float(FLAGS.config.agent_kwargs.get("bc_lambda_max", 2.0))
+                            ext_mode = FLAGS.config.agent_kwargs.get("bc_lambda_external_mode", "dual_ascent")
+                            if ext_mode == "proportional":
+                                new_lambda = max(0.0, min(lam_max, 1 * j_drop - float(FLAGS.config.agent_kwargs.get("bc_constraint", 0.1))))
+                                agent.update_config({"bc_lambda_schedule": "external", "bc_lambda_external": new_lambda})
+                                online_log["bc_lambda_external"] = new_lambda
+                                online_log["bc_lambda_external_mode"] = "proportional"
+                            else:
+                                # dual_ascent (stateful)
+                                lam_lr = float(FLAGS.config.agent_kwargs.get("bc_lambda_lr", FLAGS.config.agent_kwargs.get("bc_lagrangian_lr", 1e-3)))
+                                bc_constraint = float(FLAGS.config.agent_kwargs.get("bc_constraint", 0.1))
+                                if bc_lambda_external_state is None:
+                                    bc_lambda_external_state = float(FLAGS.config.agent_kwargs.get("bc_lambda_init", 0.0))
+                                bc_lambda_external_state = max(0.0, min(lam_max, bc_lambda_external_state + lam_lr * (j_drop - bc_constraint)))
+                                agent.update_config({"bc_lambda_schedule": "external", "bc_lambda_external": float(bc_lambda_external_state)})
+                                online_log["bc_lambda_external"] = float(bc_lambda_external_state)
+                                online_log["bc_lambda_external_mode"] = "dual_ascent"
+                    wandb_logger.log({"online_rollout": online_log}, step=step)
+
                     observation, info = finetune_env.reset()
                     done = False
+                    episode_return = 0.0
+                    episode_length = 0
+                    episode_success = None
 
         """
         Updates

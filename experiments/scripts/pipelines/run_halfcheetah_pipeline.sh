@@ -93,7 +93,7 @@ python3 finetune.py \
   --config.agent_kwargs.bc_weight_clip=10.0 \
   --config.agent_kwargs.bc_weight_scale=1.0 \
   --config.agent_kwargs.bc_weight_normalize=False \
-  --config.agent_kwargs.bc_online_enable_for_steps=100000000 \
+  \
   --exp_name wsrl_sacbc \
   --save_dir ${SAVE_ROOT} | cat
 

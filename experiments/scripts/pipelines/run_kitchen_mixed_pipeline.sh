@@ -147,21 +147,25 @@ python3 finetune.py \
   --reward_bias ${R_BIAS} \
   --resume_path ${CKPT_PATH} \
   --num_offline_steps 250000 \
-  --num_online_steps 500000 \
+  --num_online_steps 300000 \
   --utd 4 \
   --batch_size 1024 \
-  --warmup_steps 5000 \
-  --config.agent_kwargs.bc_loss_weight=1.0 \
+  --warmup_steps 0 \
+  --config.agent_kwargs.bc_steps=300000 \
+  --config.agent_kwargs.bc_lambda_init=1 \
+  --config.agent_kwargs.bc_lambda_schedule=external \
+  --config.agent_kwargs.bc_constraint_mode=j_drop \
+  --config.agent_kwargs.bc_lambda_external_mode=dual_ascent \
+  --config.agent_kwargs.bc_lagrangian_lr=1e-3 \
+  --config.agent_kwargs.bc_drop_metric=relative \
   --config.agent_kwargs.bc_target=dataset \
-  --config.agent_kwargs.bc_teacher_deterministic=True \
   --config.agent_kwargs.bc_weight_mode=td_inverse \
-  --config.agent_kwargs.bc_uncert_action_source=policy \
+  --config.agent_kwargs.bc_uncert_action_source=dataset \
   --config.agent_kwargs.bc_uncert_q_source=current \
   --config.agent_kwargs.bc_weight_uncert_measure=std \
   --config.agent_kwargs.bc_weight_clip=10.0 \
-  --config.agent_kwargs.bc_weight_scale=1.0 \
-  --config.agent_kwargs.bc_weight_normalize=False \
-  --config.agent_kwargs.bc_online_enable_for_steps=100000000 \
+  --config.agent_kwargs.bc_weight_normalize=True \
+  --config.agent_kwargs.bc_teacher_deterministic=True \
   --exp_name wsrl_sacbc \
   --save_dir ${SAVE_ROOT} | cat
 

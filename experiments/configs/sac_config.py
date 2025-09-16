@@ -55,16 +55,55 @@ def get_config(updates=None):
     )
 
     # BC augmentation defaults (used by SACBCWithTargetAgent)
+    # For base SAC: optional BC loss blending weight
     config.bc_loss_weight = 0.0
+    config.bc_lambda_init = 0.0
     config.bc_combine_mode = "sum"  # "sum" | "interpolate"
     config.bc_teacher_deterministic = True
     config.bc_teacher_eval_mode = True  # teacher uses train=False (no dropout)
     # Unified target: "dataset" | "actor_target" | path to offline checkpoint
     config.bc_target = "dataset"
-    # Online gating: 0=off; >0: window; -1: always on after online start
-    config.bc_online_enable_for_steps = -1
-    # Set at online switch time in finetune.py
-    config.bc_online_start_step = -1
+    # Lagrange/schedule options for BC weighting
+    config.bc_lambda_schedule = "fixed"  # "fixed" | "adaptive" | "linear" | "exp" | "exp_decay" | "fast_slow"
+    config.bc_lambda_exp_rate = 5.0  # decay rate for exponential schedule
+    # Constraint mode for adaptive BC Lagrange (supported in SAC-BC agent)
+    # one of: "bc_loss" | "q_drop" | "j_drop"
+    config.bc_constraint_mode = "bc_loss"
+    config.bc_constraint = 0.1
+    # Reference for q_drop constraint: "dataset" | "actor_target" | "offline_checkpoint"
+    config.bc_qdrop_reference = "dataset"
+    # Adaptive q_drop constraint options within a batch
+    # one of: "none" | "batch_quantile" | "batch_normalized"
+    config.bc_qdrop_adaptive_mode = "none"
+    config.bc_qdrop_quantile = 0.9
+    config.bc_qdrop_ema_alpha = 0.0  # placeholder (not used without host-side update)
+    config.bc_qdrop_norm_c = 0.5
+    config.bc_qdrop_eps = 1e-6
+    # Q drop metric: "absolute" | "relative" | "percent" | "percentage"
+    config.bc_qdrop_metric = "absolute"
+    config.bc_qdrop_rel_eps = 1e-6  # epsilon for relative drop computation
+
+    # Unified drop metric aliases for both internal (j_drop/q_drop) and external paths
+    # Preferred to set these (specific keys still supported and take precedence)
+    config.bc_drop_metric = "absolute"  # or "relative"|"percent"|"percentage"
+    config.bc_drop_rel_eps = 1e-6
+
+    # External lambda control defaults
+    # Mode: "proportional" (new_lambda = k * J_drop) or "dual_ascent" (stateful)
+    config.bc_lambda_external_mode = "proportional"
+    # Unified LR controlling both internal Lagrange (if set) and external defaults
+    config.bc_lagrangian_lr = 3e-4
+
+    # Performance source for drop computation: "return" | "success"
+    config.bc_perf_source = "return"
+
+    # Online-only BC gating helper removed; use bc_steps windowing instead
+    # Optimizer kwargs container to allow CLI subkey overrides like
+    # --config.agent_kwargs.bc_lagrange_optimizer_kwargs.learning_rate=1e-3
+    config.bc_lagrange_optimizer_kwargs = ConfigDict(dict(
+        learning_rate=3e-4,
+    ))
+    config.bc_steps = -1  # >0 uses [start, start+bc_steps); <=0 disables
 
     # Simplified BC per-sample weighting mode (preferred API)
     # one of: "none" | "td" | "td_inverse" | "uncert" | "uncert_inverse"

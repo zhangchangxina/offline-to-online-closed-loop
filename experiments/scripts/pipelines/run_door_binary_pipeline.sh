@@ -121,6 +121,7 @@ python3 finetune.py \
   --reward_bias ${R_BIAS} \
   --resume_path ${CKPT_PATH} \
   --num_offline_steps 20000 \
+  --num_online_steps 300000 \
   --utd 4 \
   --batch_size 1024 \
   --warmup_steps 5000 \
