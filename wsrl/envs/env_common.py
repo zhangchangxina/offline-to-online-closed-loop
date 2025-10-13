@@ -82,8 +82,21 @@ def get_env_type(env_name):
         env_type = "antmaze"
     elif "kitchen" in env_name:
         env_type = "kitchen"
-    elif "halfcheetah" in env_name or "hopper" in env_name or "walker" in env_name:
+    elif (
+        "halfcheetah" in env_name
+        or "hopper" in env_name
+        or "walker" in env_name
+        or "ant-" in env_name
+    ):
         env_type = "locomotion"
+    elif (
+        env_name.startswith("pen-")
+        or env_name.startswith("door-")
+        or env_name.startswith("hammer-")
+        or env_name.startswith("relocate-")
+    ) and ("binary" not in env_name):
+        # Adroit original dense-reward tasks from D4RL (human/cloned/expert)
+        env_type = "adroit"
     else:
         raise RuntimeError(f"Unknown environment type for {env_name}")
 
@@ -108,6 +121,14 @@ def _determine_whether_sparse_reward(env_name):
         or "walker" in env_name
         or "kitchen" in env_name
     ):
+        is_sparse_reward = False
+    elif (
+        env_name.startswith("pen-")
+        or env_name.startswith("door-")
+        or env_name.startswith("hammer-")
+        or env_name.startswith("relocate-")
+    ) and ("binary" not in env_name):
+        # Adroit dense-reward variants (human/cloned/expert)
         is_sparse_reward = False
     else:
         raise NotImplementedError

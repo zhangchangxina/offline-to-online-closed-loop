@@ -311,8 +311,9 @@ class SACAgent(flax.struct.PyTreeNode):
             rng=critic_rng,
         )
         predicted_q = predicted_qs.min(axis=0)
-        chex.assert_shape(predicted_q, (batch_size,))
-        chex.assert_shape(log_probs, (batch_size,))
+        if self.config.get("debug_checks", False):
+            chex.assert_shape(predicted_q, (batch_size,))
+            chex.assert_shape(log_probs, (batch_size,))
 
         nll_objective = -jnp.mean(
             action_distributions.log_prob(jnp.clip(batch["actions"], -0.99, 0.99))
@@ -323,31 +324,41 @@ class SACAgent(flax.struct.PyTreeNode):
         entropy_term = jnp.mean(temperature * log_probs)
         actor_loss = q_term + entropy_term
 
-        info = {
-            "actor_loss": actor_loss,
-            "actor_nll": nll_objective,
-            "temperature": temperature,
-            "target_entropy": self.config["target_entropy"],
-            "entropy": -log_probs.mean(),
-            "log_probs": log_probs,
-            "actions_mse": ((actions - batch["actions"]) ** 2).sum(axis=-1).mean(),
-            "batch_actions_var": jnp.var(batch["actions"], axis=0).mean(),
-            "pi_actions_var": jnp.var(actions, axis=0).mean(),
-            "batch_actions_mean": jnp.mean(batch["actions"], axis=0).mean(),
-            "pi_actions_mean": jnp.mean(actions, axis=0).mean(),
-            "batch_actions_sq_mean": jnp.mean(jnp.square(batch["actions"]), axis=0).mean(),
-            "pi_actions_sq_mean": jnp.mean(jnp.square(actions), axis=0).mean(),
-            "batch_actions_max": jnp.max(batch["actions"]),
-            "batch_actions_min": jnp.min(batch["actions"]),
-            "pi_actions_max": jnp.max(actions),
-            "pi_actions_min": jnp.min(actions),
-            "dataset_rewards": batch["rewards"],
-            "mc_returns": batch.get("mc_returns", None),
-            "actions": actions,
-            # Explicitly log per-term values
-            "q_term": q_term,
-            "entropy_term": entropy_term,
-        }
+        if bool(self.config.get("light_logging", True)):
+            info = {
+                "actor_loss": actor_loss,
+                "actor_nll": nll_objective,
+                "temperature": temperature,
+                "target_entropy": self.config["target_entropy"],
+                "entropy": -log_probs.mean(),
+                "q_term": q_term,
+                "entropy_term": entropy_term,
+            }
+        else:
+            info = {
+                "actor_loss": actor_loss,
+                "actor_nll": nll_objective,
+                "temperature": temperature,
+                "target_entropy": self.config["target_entropy"],
+                "entropy": -log_probs.mean(),
+                "log_probs": log_probs,
+                "actions_mse": ((actions - batch["actions"]) ** 2).sum(axis=-1).mean(),
+                "batch_actions_var": jnp.var(batch["actions"], axis=0).mean(),
+                "pi_actions_var": jnp.var(actions, axis=0).mean(),
+                "batch_actions_mean": jnp.mean(batch["actions"], axis=0).mean(),
+                "pi_actions_mean": jnp.mean(actions, axis=0).mean(),
+                "batch_actions_sq_mean": jnp.mean(jnp.square(batch["actions"]), axis=0).mean(),
+                "pi_actions_sq_mean": jnp.mean(jnp.square(actions), axis=0).mean(),
+                "batch_actions_max": jnp.max(batch["actions"]),
+                "batch_actions_min": jnp.min(batch["actions"]),
+                "pi_actions_max": jnp.max(actions),
+                "pi_actions_min": jnp.min(actions),
+                "dataset_rewards": batch["rewards"],
+                "mc_returns": batch.get("mc_returns", None),
+                "actions": actions,
+                "q_term": q_term,
+                "entropy_term": entropy_term,
+            }
 
         # Optional: per-term gradient norms for actor params (and log_std layer)
         if self.config.get("log_actor_grad_terms", False):
@@ -409,6 +420,9 @@ class SACAgent(flax.struct.PyTreeNode):
             )
             info["actor_loss"] = actor_loss
 
+        # Ensure no large arrays leak into logs in light mode
+        if bool(self.config.get("light_logging", True)):
+            info.pop("actions", None)
         return actor_loss, info
 
     def temperature_loss_fn(self, batch, params: Params, rng: PRNGKey):
@@ -459,7 +473,8 @@ class SACAgent(flax.struct.PyTreeNode):
             Tuple of (new agent, info dict).
         """
         batch_size = batch["rewards"].shape[0]
-        chex.assert_tree_shape_prefix(batch, (batch_size,))
+        if self.config.get("debug_checks", False):
+            chex.assert_tree_shape_prefix(batch, (batch_size,))
 
         rng, key = jax.random.split(self.state.rng)
 
@@ -746,7 +761,8 @@ class SACAgent(flax.struct.PyTreeNode):
             batch_size % utd_ratio == 0
         ), f"Batch size {batch_size} must be divisible by UTD ratio {utd_ratio}"
         minibatch_size = batch_size // utd_ratio
-        chex.assert_tree_shape_prefix(batch, (batch_size,))
+        if self.config.get("debug_checks", False):
+            chex.assert_tree_shape_prefix(batch, (batch_size,))
 
         def scan_body(carry: Tuple[SACAgent], data: Tuple[Batch]):
             (agent,) = carry

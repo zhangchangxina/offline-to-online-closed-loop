@@ -57,7 +57,7 @@ def get_config(updates=None):
     # BC augmentation defaults (used by SACBCWithTargetAgent)
     # For base SAC: optional BC loss blending weight
     config.bc_loss_weight = 0.0
-    config.bc_lambda_init = 0.0
+    config.bc_lambda_init = 0.1  # 设置一个小的正初始值，避免强制设为1.0
     config.bc_combine_mode = "sum"  # "sum" | "interpolate"
     config.bc_teacher_deterministic = True
     config.bc_teacher_eval_mode = True  # teacher uses train=False (no dropout)
@@ -94,7 +94,7 @@ def get_config(updates=None):
     # Unified LR controlling both internal Lagrange (if set) and external defaults
     config.bc_lagrangian_lr = 3e-4
 
-    # Performance source for drop computation: "return" | "success"
+    # Performance source for drop computation: "return" | "success" | "ewma"
     config.bc_perf_source = "return"
 
     # Online-only BC gating helper removed; use bc_steps windowing instead

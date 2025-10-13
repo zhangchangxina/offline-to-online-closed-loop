@@ -1,3 +1,4 @@
+from .awac import AWACAgent
 from .bc import BCAgent
 from .calql import CalQLAgent
 from .cql import CQLAgent
@@ -7,6 +8,7 @@ from .closed_loop_sac import ClosedLoopSACAgent
 from .sac_bc import SACBCWithTargetAgent
 
 agents = {
+    "awac": AWACAgent,
     "bc": BCAgent,
     "iql": IQLAgent,
     "cql": CQLAgent,

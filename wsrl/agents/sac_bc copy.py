@@ -231,10 +231,16 @@ class SACBCWithTargetAgent(SACAgent):
         else:
             bc_lambda = jnp.asarray(float(self.config["bc_lambda_init"]), dtype=jnp.float32)
 
-    
+        # Optional upper bound on lambda (applies to all schedules)
+        lam_max = float(self.config.get("bc_lambda_max", 2.0))
+        if lam_max > 0.0:
+            bc_lambda = jnp.minimum(bc_lambda, jnp.asarray(lam_max, dtype=jnp.float32))
+        step = outer_step
+        # Gate window (in outer steps): start = num_offline_steps + warmup_steps; length = bc_steps
+        
         # Online gating semantics (simplified):
         # len > 0 -> [start, start+len)
-        bc_enabled_bool = (outer_step >= start_val) & (outer_step < (start_val + steps_val))
+        bc_enabled_bool = (step >= start_val) & (step < (start_val + steps_val))
         bc_mask = bc_enabled_bool.astype(jnp.float32)
 
         # Resolve BC target via unified key bc_target only
@@ -310,6 +316,8 @@ class SACBCWithTargetAgent(SACAgent):
             target_actions = jnp.clip(batch["actions"], -0.99, 0.99)
             bc_per = -action_distributions.log_prob(target_actions)
 
+        if self.config.get("debug_checks", False):
+            chex.assert_shape(bc_per, (batch_size,))
 
         # Per-sample BC weighting via `bc_weight_mode` (preferred path)
         # Use simplified bc_weight_mode (support aliases)
@@ -597,14 +605,14 @@ class SACBCWithTargetAgent(SACAgent):
         if mode == "j_drop":
             # Constraint on performance drop J_drop. Supports absolute or relative metric.
             # Accept either return-based or success-based baseline
-            baseline = self.config.get("perf_baseline", None)
-            perf_online = self.config.get("perf_online", None)
+            baseline = self.config.get("perf_baseline_return", self.config.get("perf_baseline_success", None))
+            ewma = self.config.get("perf_ewma_return", None)
             # Optional gating: only update lambda when a fresh J-drop has been produced by the trainer
             if bool(self.config.get("bc_update_on_new_jdrop_only", True)) and not bool(self.config.get("bc_has_new_jdrop", False)):
                 return 0.0, {"bc_lagrange_loss": 0.0}
-            if (baseline is None) or (perf_online is None):
+            if (baseline is None) or (ewma is None):
                 # No-op until trainer provides metrics
-                return 0.0, {"bc_lagrange_loss": 0.0, "debug_baseline": baseline, "debug_perf_online": perf_online}
+                return 0.0, {"bc_lagrange_loss": 0.0}
 
             # Compute J_drop per metric
             jdrop_metric = str(self.config.get("bc_jdrop_metric", self.config.get("bc_drop_metric", "absolute")))
@@ -613,13 +621,14 @@ class SACBCWithTargetAgent(SACAgent):
                 dtype=jnp.float32,
             )
             baseline_val = jnp.asarray(float(baseline), dtype=jnp.float32)
-            perf_online_val = jnp.asarray(float(perf_online), dtype=jnp.float32)
-            raw_drop = baseline_val - perf_online_val
-            is_relative = jdrop_metric in ("relative")
+            ewma_val = jnp.asarray(float(ewma), dtype=jnp.float32)
+            raw_drop = baseline_val - ewma_val
+            is_relative = jdrop_metric in ("relative", "percent", "percentage")
             if is_relative:
                 j_drop = raw_drop / (jnp.abs(baseline_val) + rel_eps)
             else:
                 j_drop = raw_drop
+            j_drop = jnp.maximum(j_drop, 0.0)
 
             lhs_value = jax.lax.stop_gradient(j_drop)
             bc_constraint_eff = jax.lax.stop_gradient(bc_constraint)
@@ -639,6 +648,7 @@ class SACBCWithTargetAgent(SACAgent):
             )
             
             lambda_value = self.forward_bc_lagrange(grad_params=params)
+            lam_max = float(self.config.get("bc_lambda_max", 2.0))
             lambda_capped = lambda_value  # already projected inside forward_bc_lagrange
             complementarity = lambda_value * constraint_violation
             metric_code = jnp.asarray(1 if is_relative else 0, dtype=jnp.int32)
@@ -715,7 +725,7 @@ class SACBCWithTargetAgent(SACAgent):
                 dtype=jnp.float32,
             )
             q_drop_raw = q_ref - q_pi
-            if q_drop_metric in ("relative"):
+            if q_drop_metric in ("relative", "percent", "percentage"):
                 # Relative drop: (Q_ref - Q_pi) / (|Q_ref| + eps)
                 q_drop = q_drop_raw / (jnp.abs(q_ref) + rel_eps)
             else:
@@ -757,8 +767,6 @@ class SACBCWithTargetAgent(SACAgent):
             )
             
             lambda_value = self.forward_bc_lagrange(grad_params=params)
-            # Cap for logging consistency (forward_bc_lagrange already projects to >=0)
-            lambda_capped = lambda_value  # already projected; apply additional cap if desired
             complementarity = lambda_value * constraint_violation
             info = {
                 "bc_qdrop_mean": lhs_value,
@@ -792,6 +800,7 @@ class SACBCWithTargetAgent(SACAgent):
             )
             
             lambda_value = self.forward_bc_lagrange(grad_params=params)
+            lam_max = float(self.config.get("bc_lambda_max", 2.0))
             lambda_capped = lambda_value  # already projected
             complementarity = lambda_value * constraint_violation
             info = {

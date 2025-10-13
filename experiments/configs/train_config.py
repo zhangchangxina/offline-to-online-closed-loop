@@ -1,5 +1,6 @@
 from ml_collections import ConfigDict
 
+from experiments.configs.awac_config import get_config as get_awac_config
 from experiments.configs.cql_config import get_config as get_cql_config
 from experiments.configs.iql_config import get_config as get_iql_config
 from experiments.configs.sac_config import get_config as get_sac_config
@@ -46,6 +47,31 @@ def get_config(config_string):
                     updates=dict(
                         expectile=0.9,
                         temperature=10.0,
+                    )
+                ).to_dict(),
+            )
+        ),
+
+        "antmaze_awac": ConfigDict(
+            dict(
+                agent_kwargs=get_awac_config(
+                    updates=dict(
+                        policy_kwargs=dict(
+                            tanh_squash_distribution=True,
+                            std_parameterization="uniform",
+                        ),
+                        critic_network_kwargs={
+                            "hidden_dims": [256, 256, 256, 256],
+                            "activations": "relu",
+                            "kernel_scale_final": 1e-2,
+                        },
+                        policy_network_kwargs={
+                            "hidden_dims": [256, 256],
+                            "activations": "relu",
+                            "kernel_scale_final": 1e-2,
+                        },
+                        temperature=10.0,
+                        expectile=0.9,
                     )
                 ).to_dict(),
             )
@@ -154,6 +180,31 @@ def get_config(config_string):
             )
         ),
 
+        "adroit_awac": ConfigDict(
+            dict(
+                agent_kwargs=get_awac_config(
+                    updates=dict(
+                        policy_kwargs=dict(
+                            tanh_squash_distribution=True,
+                            std_parameterization="exp",
+                        ),
+                        critic_network_kwargs={
+                            "hidden_dims": [512, 512, 512],
+                            "kernel_scale_final": 1e-2,
+                            "activations": "relu",
+                        },
+                        policy_network_kwargs={
+                            "hidden_dims": [512, 512],
+                            "kernel_scale_final": 1e-2,
+                            "activations": "relu",
+                        },
+                        temperature=0.5,
+                        expectile=0.7,
+                    )
+                ).to_dict(),
+            )
+        ),
+
         "adroit_wsrl": ConfigDict(
             dict(
                 agent_kwargs=get_wsrl_config(
@@ -257,6 +308,29 @@ def get_config(config_string):
             )
         ),
 
+        "kitchen_awac": ConfigDict(
+            dict(
+                agent_kwargs=get_awac_config(
+                    updates=dict(
+                        policy_kwargs=dict(
+                            tanh_squash_distribution=True,
+                            std_parameterization="exp",
+                        ),
+                        critic_network_kwargs={
+                            "hidden_dims": [512, 512, 512],
+                            "activations": "relu",
+                        },
+                        policy_network_kwargs={
+                            "hidden_dims": [512, 512, 512],
+                            "activations": "relu",
+                        },
+                        temperature=0.5,
+                        expectile=0.7,
+                    )
+                ).to_dict(),
+            )
+        ),
+
         "kitchen_wsrl": ConfigDict(
             dict(
                 agent_kwargs=get_wsrl_config(
@@ -339,6 +413,27 @@ def get_config(config_string):
                     updates=dict(
                         expectile=0.7,
                         temperature=3.0,
+                    )
+                ).to_dict(),
+            )
+        ),
+
+        "locomotion_awac": ConfigDict(
+            dict(
+                agent_kwargs=get_awac_config(
+                    updates=dict(
+                        critic_network_kwargs={
+                            "hidden_dims": [256, 256],
+                            "activations": "relu",
+                            "kernel_scale_final": 1e-2,
+                        },
+                        policy_network_kwargs={
+                            "hidden_dims": [256, 256],
+                            "activations": "relu",
+                            "kernel_scale_final": 1e-2,
+                        },
+                        temperature=3.0,
+                        expectile=0.7,
                     )
                 ).to_dict(),
             )
