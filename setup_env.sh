@@ -19,7 +19,7 @@ echo "4. 安装其他依赖..."
 pip install pybullet pybullet_envs mujoco-py
 
 echo "5. 设置环境变量..."
-export D4RL_DATASET_DIR=/media/nudt3090/XYQ/ZCX/WSRL/datasets/d4rl
+export D4RL_DATASET_DIR=../datasets/d4rl
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export PYOPENGL_PLATFORM=egl
 export MUJOCO_GL=egl
@@ -27,7 +27,7 @@ export WANDB_BASE_URL=https://api.bandw.top
 export MUJOCO_PY_MUJOCO_PATH=$HOME/.mujoco/mujoco210
 export MUJOCO_PY_MUJOCO_LIB=$HOME/.mujoco/mujoco210/bin/libmujoco210.so
 export D4RL_SUPPRESS_IMPORT_ERROR=1
-export PYTHONPATH=/media/nudt3090/XYQ/ZCX/WSRL/wsrl-main/D4RL:${PYTHONPATH}
+export PYTHONPATH=../wsrl-main/D4RL:${PYTHONPATH}
 export LD_LIBRARY_PATH=$HOME/.mujoco/mujoco210/bin:/usr/lib/nvidia
 export CUDA_VISIBLE_DEVICES=0
 export JAX_PLUGINS=none
@@ -44,7 +44,7 @@ cat > quick_test.py << 'EOF'
 
 import os
 import sys
-sys.path.append('/media/nudt3090/XYQ/ZCX/WSRL/wsrl-main')
+sys.path.append('../wsrl-main')
 
 # 设置环境变量
 os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'

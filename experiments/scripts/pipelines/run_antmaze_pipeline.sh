@@ -2,23 +2,17 @@
 
 set -euo pipefail
 
+set -a
+source .env
+set +a
+
 # Usage: bash experiments/scripts/pipelines/run_antmaze_pipeline.sh <GPU_ID>
 
 GPU_ID=${1:-3}
 export CUDA_VISIBLE_DEVICES=${GPU_ID}
 
-export XLA_PYTHON_CLIENT_PREALLOCATE=false
-export PYOPENGL_PLATFORM=egl
-export MUJOCO_GL=egl
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$HOME/.mujoco/mujoco210/bin
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/nvidia
-export D4RL_DATASET_DIR=/media/nudt3090/XYQ/ZCX/WSRL/datasets/d4rl
-export WANDB_BASE_URL=https://api.bandw.top
-export JAX_TRACEBACK_FILTERING=off
-
 ENV_ID="antmaze-medium-play-v2"
 SEED=0
-SAVE_ROOT="/media/nudt3090/XYQ/ZCX/WSRL/wsrl_log"
 PROJECT_DIR="wsrl"
 
 # AntMaze recommended scaling

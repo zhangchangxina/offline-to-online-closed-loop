@@ -142,13 +142,13 @@ export PYOPENGL_PLATFORM=egl
 export MUJOCO_GL=egl
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$HOME/.mujoco/mujoco210/bin
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/nvidia
-export D4RL_DATASET_DIR=/media/nudt3090/XYQ/ZCX/WSRL/datasets/d4rl
+export D4RL_DATASET_DIR=../datasets/d4rl
 export WANDB_BASE_URL=https://api.bandw.top
 ```
 
 ## Output and Logging
 
-- **Checkpoints**: Saved to `/media/nudt3090/XYQ/ZCX/WSRL/wsrl_log/`
+- **Checkpoints**: Saved to `../wsrl_log/`
 - **Logs**: Training logs saved to `${SAVE_ROOT}/calql_${ENV_ID}_seed${SEED}.log`
 - **Wandb**: Experiment tracking via Weights & Biases
 

@@ -98,12 +98,12 @@ export PYOPENGL_PLATFORM=egl
 export MUJOCO_GL=egl
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$HOME/.mujoco/mujoco210/bin
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/nvidia
-export D4RL_DATASET_DIR=/media/nudt3090/XYQ/ZCX/WSRL/datasets/d4rl
+export D4RL_DATASET_DIR=../datasets/d4rl
 export WANDB_BASE_URL=https://api.bandw.top
 
 ENV_ID="kitchen-partial-v0"
 SEED=0
-SAVE_ROOT="/media/nudt3090/XYQ/ZCX/WSRL/wsrl_log"
+SAVE_ROOT="../wsrl_log"
 PROJECT_DIR="wsrl"
 
 R_SCALE=1.0
@@ -147,7 +147,7 @@ python3 finetune.py \\
 echo "[GPU ${GPU_ID}] 优化训练完成"
 '''
     
-    with open('/media/nudt3090/XYQ/ZCX/WSRL/wsrl-main/run_kitchen_optimized.sh', 'w') as f:
+    with open('../wsrl-main/run_kitchen_optimized.sh', 'w') as f:
         f.write(script_content)
     
     print("✅ 已生成优化训练脚本: run_kitchen_optimized.sh")

@@ -2,31 +2,33 @@
 
 set -euo pipefail
 
+set -a
+source .env
+set +a
 # Usage: bash experiments/scripts/pipelines/run_bullet_pipeline.sh <GPU_ID>
 
 GPU_ID=${1:-3}
 export CUDA_VISIBLE_DEVICES=${GPU_ID}
 
-# 关键优化：设置环境变量避免 JIT 重新编译
-export TF_ENABLE_ONEDNN_OPTS=0
-export XLA_PYTHON_CLIENT_PREALLOCATE=false
-export XLA_PYTHON_CLIENT_MEM_FRACTION=0.8
-export JAX_ENABLE_X64=false
-export JAX_TRACEBACK_FILTERING=off
-export XLA_FLAGS="--xla_gpu_enable_triton_softmax_fusion=true --xla_gpu_triton_gemm_any=true"
+# # 关键优化：设置环境变量避免 JIT 重新编译
+# export TF_ENABLE_ONEDNN_OPTS=0
+# export XLA_PYTHON_CLIENT_PREALLOCATE=false
+# export XLA_PYTHON_CLIENT_MEM_FRACTION=0.8
+# export JAX_ENABLE_X64=false
+# export JAX_TRACEBACK_FILTERING=off
+# export XLA_FLAGS="--xla_gpu_enable_triton_softmax_fusion=true --xla_gpu_triton_gemm_any=true"
 
-# 其他环境变量
-export PYOPENGL_PLATFORM=egl
-export MUJOCO_GL=egl
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$HOME/.mujoco/mujoco210/bin
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/nvidia
-export D4RL_DATASET_DIR=/media/nudt3090/XYQ/ZCX/WSRL/datasets/d4rl
-export WANDB_BASE_URL=https://api.bandw.top
+# # 其他环境变量
+# export PYOPENGL_PLATFORM=egl
+# export MUJOCO_GL=egl
+# export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$HOME/.mujoco/mujoco210/bin
+# export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/nvidia
+# export D4RL_DATASET_DIR=../datasets/d4rl
+# export WANDB_BASE_URL=https://api.bandw.top
 
 # Bullet defaults (PyBullet physics simulation)
 ENV_ID="bullet-halfcheetah-medium-v0"
 SEED=0
-SAVE_ROOT="/media/nudt3090/XYQ/ZCX/WSRL/wsrl_log"
 PROJECT_DIR="wsrl"
 
 # Bullet recommended scaling (similar to MuJoCo but with different physics)

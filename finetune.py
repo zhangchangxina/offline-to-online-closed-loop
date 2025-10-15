@@ -355,8 +355,11 @@ def main(_):
             if FLAGS.online_sampling_method == "append":
                 offline_dataset_size = dataset["actions"].shape[0]
                 dataset_items = dataset.items()
+                # Only keep keys that exist in the replay buffer to avoid assertion error
+                allowed_keys = set(replay_buffer.dataset_dict.keys())
                 for j in range(offline_dataset_size):
-                    transition = {k: v[j] for k, v in dataset_items}
+                    transition_full = {k: v[j] for k, v in dataset_items}
+                    transition = {k: transition_full[k] for k in allowed_keys}
                     replay_buffer.insert(transition)
 
             # option for CQL and CalQL to change the online alpha, and whether to use CQL regularizer

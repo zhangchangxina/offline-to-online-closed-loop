@@ -329,6 +329,93 @@ class AWACAgent(flax.struct.PyTreeNode):
 
         return self.replace(state=new_state), info
 
+    @partial(jax.jit, static_argnames=("utd_ratio", "pmap_axis"))
+    def update_high_utd(
+        self,
+        batch: Batch,
+        *,
+        utd_ratio: int,
+        pmap_axis: Optional[str] = None,
+    ) -> Tuple["AWACAgent", dict]:
+        """
+        High-UTD update:
+        - Perform `utd_ratio` critic+value-only updates on minibatches (with target updates each step).
+        - Then perform one actor-only update on the full batch (no target update here).
+
+        Batch dimension must be divisible by `utd_ratio`.
+        """
+        batch_size = batch["rewards"].shape[0]
+        assert (
+            batch_size % utd_ratio == 0
+        ), f"Batch size {batch_size} must be divisible by UTD ratio {utd_ratio}"
+        minibatch_size = batch_size // utd_ratio
+        if self.config.get("debug_checks", False):
+            chex.assert_tree_shape_prefix(batch, (batch_size,))
+
+        def scan_body(carry: Tuple["AWACAgent"], data: Tuple[Batch]):
+            (agent,) = carry
+            (minibatch,) = data
+
+            rng, new_rng = jax.random.split(agent.state.rng)
+
+            # Critic + value updates only (actor grads zeroed)
+            loss_fns = {
+                "critic": partial(agent.critic_loss_fn, minibatch),
+                "value": partial(agent.value_loss_fn, minibatch),
+                "actor": lambda params, rng: (jnp.array(0.0), {}),
+            }
+            new_state, info = agent.state.apply_loss_fns(
+                loss_fns, pmap_axis=pmap_axis, has_aux=True
+            )
+
+            # Target updates after critic/value updates
+            new_state = new_state.target_update(agent.config["target_update_rate"])
+            # Update RNG
+            new_state = new_state.replace(rng=new_rng)
+
+            return (agent.replace(state=new_state),), info
+
+        def make_minibatch(data: jnp.ndarray):
+            return jnp.reshape(data, (utd_ratio, minibatch_size) + data.shape[1:])
+
+        minibatches = jax.tree_util.tree_map(make_minibatch, batch)
+
+        (agent,), critic_infos = jax.lax.scan(scan_body, (self,), (minibatches,))
+
+        # Average critic/value infos across UTD steps
+        critic_infos = jax.tree_util.tree_map(lambda x: jnp.mean(x, axis=0), critic_infos)
+        # Remove actor info from critic-only phase if present
+        try:
+            del critic_infos["actor"]
+        except Exception:
+            pass
+
+        # One actor-only update on the full batch (no target update)
+        rng, new_rng = jax.random.split(agent.state.rng)
+        loss_fns = {
+            "critic": lambda params, rng: (jnp.array(0.0), {}),
+            "value": lambda params, rng: (jnp.array(0.0), {}),
+            "actor": partial(agent.policy_loss_fn, batch),
+        }
+        new_state, actor_infos = agent.state.apply_loss_fns(
+            loss_fns, pmap_axis=pmap_axis, has_aux=True
+        )
+        new_state = new_state.replace(rng=new_rng)
+        agent = agent.replace(state=new_state)
+
+        # Remove critic/value placeholders from actor step if present
+        try:
+            del actor_infos["critic"]
+        except Exception:
+            pass
+        try:
+            del actor_infos["value"]
+        except Exception:
+            pass
+
+        infos = {**critic_infos, **actor_infos}
+        return agent, infos
+
     @partial(jax.jit, static_argnames="argmax")
     def sample_actions(
         self,

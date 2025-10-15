@@ -5,7 +5,7 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$HOME/.mujoco/mujoco210/bin
 export LD_LIBRARY_PATH=$HOME/.mujoco/mujoco210/bin:/usr/lib/nvidia 
 
 
-export DATA_DIR_PREFIX=/media/nudt3090/XYQ/ZCX/WSRL/datasets/adroit_data
+export DATA_DIR_PREFIX=../datasets/adroit_data
 export WANDB_BASE_URL=https://api.bandw.top
 export CUDA_VISIBLE_DEVICES=1
 

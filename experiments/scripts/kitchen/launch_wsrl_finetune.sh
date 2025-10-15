@@ -3,7 +3,7 @@ export PYOPENGL_PLATFORM=egl
 export MUJOCO_GL=egl
 # Ensure NVIDIA libs are available for EGL; avoid legacy mujoco210 forcing
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/nvidia
-export D4RL_DATASET_DIR=/media/nudt3090/XYQ/ZCX/WSRL/datasets/d4rl
+export D4RL_DATASET_DIR=../datasets/d4rl
 export WANDB_BASE_URL=https://api.bandw.top
 export CUDA_VISIBLE_DEVICES=0
 
