@@ -29,7 +29,7 @@ python3 finetune.py \
   --use_redq True \
   --reward_scale ${R_SCALE} \
   --reward_bias ${R_BIAS} \
-  --num_offline_steps 100000 \
+  --num_offline_steps 300000 \
   --num_online_steps 300000 \
   --save_interval 50000 \
   --utd 4 \
@@ -50,7 +50,7 @@ python3 finetune.py \
   --utd 4 \
   --reward_scale ${R_SCALE} \
   --reward_bias ${R_BIAS} \
-  --num_offline_steps 100000 \
+  --num_offline_steps 300000 \
   --num_online_steps 300000 \
   --save_interval 50000 \
   --exp_name calql_ensemble_highutd \
@@ -62,6 +62,26 @@ RUN_DIR=$(ls -1dt ${SAVE_ROOT}/${PROJECT_DIR}/${EXP_DESC}_* | head -n 1)
 CKPT_PATH="${RUN_DIR}/checkpoint_100000"
 echo "[GPU ${GPU_ID}] Using checkpoint: ${CKPT_PATH}"
 
+
+echo "[GPU ${GPU_ID}] CALQL-APPEND (REDQ10, UTD=4) pretrain for ${ENV_ID}"
+python3 finetune.py \
+  --agent calql \
+  --config experiments/configs/train_config.py:adroit_cql \
+  --env ${ENV_ID} \
+  --seed ${SEED} \
+  --resume_path ${CKPT_PATH} \
+  --use_redq True \
+  --utd 4 \
+  --reward_scale ${R_SCALE} \
+  --reward_bias ${R_BIAS} \
+  --num_offline_steps 300000 \
+  --num_online_steps 300000 \
+  --save_interval 50000 \
+  --online_sampling_method append \
+  --exp_name calql_ensemble_highutd_append \
+  --save_dir ${SAVE_ROOT} \
+  2>&1 | tee -a ${SAVE_ROOT}/calql_${ENV_ID}_seed${SEED}.log
+
 echo "[GPU ${GPU_ID}] WSRL (SAC) from CALQL-20K for ${ENV_ID}"
 python3 finetune.py \
   --agent sac \
@@ -72,7 +92,7 @@ python3 finetune.py \
   --reward_scale ${R_SCALE} \
   --reward_bias ${R_BIAS} \
   --resume_path ${CKPT_PATH} \
-  --num_offline_steps 100000 \
+  --num_offline_steps 300000 \
   --num_online_steps 300000 \
   --utd 4 \
   --batch_size 1024 \
@@ -90,7 +110,7 @@ python3 finetune.py \
   --reward_scale ${R_SCALE} \
   --reward_bias ${R_BIAS} \
   --resume_path ${CKPT_PATH} \
-  --num_offline_steps 100000 \
+  --num_offline_steps 300000 \
   --num_online_steps 300000 \
   --utd 4 \
   --batch_size 1024 \
@@ -125,7 +145,7 @@ python3 finetune.py \
   --reward_scale ${R_SCALE} \
   --reward_bias ${R_BIAS} \
   --resume_path ${CKPT_PATH} \
-  --num_offline_steps 100000 \
+  --num_offline_steps 300000 \
   --num_online_steps 300000 \
   --utd 4 \
   --batch_size 1024 \

@@ -257,11 +257,18 @@ class JaxRLTrainState(struct.PyTreeNode):
             target_params: The target model parameters.
             rng: The rng key used to initialize the rng chain for `apply_loss_fns`.
         """
+        # Ensure target_params do not alias params to avoid buffer donation conflicts
+        safe_target_params = (
+            target_params
+            if target_params is not None
+            else jax.tree_util.tree_map(lambda x: jnp.copy(x), params)
+        )
+
         return cls(
             step=jnp.array(0, dtype=jnp.int32),
             apply_fn=apply_fn,
             params=params,
-            target_params=target_params,
+            target_params=safe_target_params,
             txs=txs,
             opt_states=cls._tx_tree_map(lambda tx: tx.init(params), txs),
             rng=rng,

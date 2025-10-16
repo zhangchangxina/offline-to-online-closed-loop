@@ -830,7 +830,7 @@ class SACBCWithTargetAgent(SACAgent):
             loss_map["bc_lagrange"] = _partial(self.bc_lagrange_loss_fn, batch)
         return loss_map
 
-    @partial(jax.jit, static_argnames=("pmap_axis", "networks_to_update"), donate_argnums=(0,))
+    @partial(jax.jit, static_argnames=("pmap_axis", "networks_to_update"))
     def update(
         self,
         batch: Batch,
