@@ -36,11 +36,26 @@ def make_gym_env(
     """
     create a gym environment for antmaze, kitchen, adroit, and locomotion tasks.
     """
-    try:
-        env = gym.make(env_name, seed=seed)
-    except TypeError:
-        # some envs don't take in seed as argument
+    # Prefer mujoco_py backend for D4RL kitchen to avoid dm_control XML issues
+    if "kitchen" in env_name:
+        try:
+            import importlib  # local import to avoid global dependency
+            mujoco_env_mod = importlib.import_module("d4rl.kitchen.adept_envs.mujoco_env")
+            if getattr(mujoco_env_mod, "USE_DM_CONTROL", None):
+                mujoco_env_mod.USE_DM_CONTROL = False
+        except Exception:
+            # Best-effort; fall back silently if not available
+            pass
+
+    # Create env; avoid passing seed to envs that don't support it (e.g., kitchen)
+    if "kitchen" in env_name:
         env = gym.make(env_name)
+    else:
+        try:
+            env = gym.make(env_name, seed=seed)
+        except TypeError:
+            # some envs don't take in seed as argument
+            env = gym.make(env_name)
 
     # fix the done signal
     if "kitchen" in env_name:

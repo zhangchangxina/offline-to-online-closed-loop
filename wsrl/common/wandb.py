@@ -8,7 +8,14 @@ from socket import gethostname
 
 import absl.flags as flags
 import ml_collections
+import numpy as np
 import wandb
+
+try:
+    import jax.numpy as jnp
+    HAS_JAX = True
+except ImportError:
+    HAS_JAX = False
 
 
 def _recursive_flatten_dict(d: dict):
@@ -22,6 +29,42 @@ def _recursive_flatten_dict(d: dict):
             keys.append(key)
             values.append(value)
     return keys, values
+
+
+def _filter_nan_values(data: dict) -> dict:
+    """
+    Recursively filter out NaN and infinite values from a dictionary.
+    This prevents wandb from crashing when trying to create histograms from NaN values.
+    """
+    filtered_data = {}
+    for key, value in data.items():
+        if isinstance(value, dict):
+            # Recursively filter nested dictionaries
+            filtered_value = _filter_nan_values(value)
+            if filtered_value:  # Only include non-empty dictionaries
+                filtered_data[key] = filtered_value
+        else:
+            # Check if value is a number and if it's finite
+            try:
+                # Handle JAX arrays if available
+                if HAS_JAX and hasattr(value, 'shape') and hasattr(value, 'dtype'):
+                    # This is likely a JAX array
+                    if jnp.isfinite(value).all():
+                        filtered_data[key] = value
+                elif hasattr(value, '__iter__') and not isinstance(value, str):
+                    # Handle numpy arrays/lists
+                    value_array = np.asarray(value)
+                    if np.isfinite(value_array).all():
+                        filtered_data[key] = value
+                else:
+                    # Handle scalar values
+                    if np.isfinite(value):
+                        filtered_data[key] = value
+            except (TypeError, ValueError, AttributeError):
+                # If we can't convert to numeric, keep the original value
+                # (e.g., strings, booleans, etc.)
+                filtered_data[key] = value
+    return filtered_data
 
 
 def generate_random_string(length=6):
@@ -109,6 +152,16 @@ class WandBLogger(object):
         wandb.config.update(flag_dict)
 
     def log(self, data: dict, step: int = None):
-        data_flat = _recursive_flatten_dict(data)
+        # Filter out NaN and infinite values before logging
+        filtered_data = _filter_nan_values(data)
+        
+        # Log a warning if any values were filtered out
+        original_keys = set(_recursive_flatten_dict(data)[0])
+        filtered_keys = set(_recursive_flatten_dict(filtered_data)[0])
+        filtered_out_keys = original_keys - filtered_keys
+        if filtered_out_keys:
+            print(f"Warning: Filtered out {len(filtered_out_keys)} metrics with NaN/inf values: {list(filtered_out_keys)}")
+        
+        data_flat = _recursive_flatten_dict(filtered_data)
         data = {k: v for k, v in zip(*data_flat)}
         wandb.log(data, step=step)

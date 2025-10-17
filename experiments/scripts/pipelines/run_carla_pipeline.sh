@@ -19,6 +19,10 @@ PROJECT_DIR="wsrl"
 R_SCALE=1.0
 R_BIAS=0.0
 
+num_offline_steps=300000
+num_online_steps=300000
+save_interval=50000
+
 echo "[GPU ${GPU_ID}] Checking env availability: ${ENV_ID}"
 python3 - <<PY
 import sys
@@ -31,7 +35,26 @@ except Exception as e:
     sys.exit(1)
 PY
 
-echo "[GPU ${GPU_ID}] CALQL (REDQ10, UTD=4) pretrain+online for ${ENV_ID}"
+echo "[GPU ${GPU_ID}] AWAC from CALQL-20K for ${ENV_ID}"
+python3 finetune.py \
+  --agent awac \
+  --config experiments/configs/train_config.py:locomotion_awac \
+  --env ${ENV_ID} \
+  --seed ${SEED} \
+  --use_redq True \
+  --reward_scale ${R_SCALE} \
+  --reward_bias ${R_BIAS} \
+  --num_offline_steps ${num_offline_steps} \
+  --num_online_steps ${num_online_steps} \
+  --save_interval ${save_interval} \
+  --utd 4 \
+  --batch_size 1024 \
+  --online_sampling_method append \
+  --exp_name awac \
+  --save_dir ${SAVE_ROOT} | cat
+
+
+echo "[GPU ${GPU_ID}] CALQL (REDQ10, UTD=4) pretrain for ${ENV_ID}"
 python3 finetune.py \
   --agent calql \
   --config experiments/configs/train_config.py:locomotion_cql \
@@ -41,18 +64,39 @@ python3 finetune.py \
   --utd 4 \
   --reward_scale ${R_SCALE} \
   --reward_bias ${R_BIAS} \
-  --num_offline_steps 300000 \
-  --save_interval 100000 \
+  --num_offline_steps ${num_offline_steps} \
+  --num_online_steps ${num_online_steps} \
+  --save_interval ${save_interval} \
   --exp_name calql_ensemble_highutd \
   --save_dir ${SAVE_ROOT} \
   2>&1 | tee -a ${SAVE_ROOT}/calql_${ENV_ID}_seed${SEED}.log
 
 EXP_DESC="calql_ensemble_highutd_${ENV_ID}_calql_seed${SEED}"
 RUN_DIR=$(ls -1dt ${SAVE_ROOT}/${PROJECT_DIR}/${EXP_DESC}_* | head -n 1)
-CKPT_PATH="${RUN_DIR}/checkpoint_300000"
+CKPT_PATH="${RUN_DIR}/checkpoint_${num_offline_steps}"
 echo "[GPU ${GPU_ID}] Using checkpoint: ${CKPT_PATH}"
 
-echo "[GPU ${GPU_ID}] WSRL (SAC) from CALQL-300K for ${ENV_ID}"
+
+echo "[GPU ${GPU_ID}] CALQL-APPEND (REDQ10, UTD=4) pretrain for ${ENV_ID}"
+python3 finetune.py \
+  --agent calql \
+  --config experiments/configs/train_config.py:locomotion_cql \
+  --env ${ENV_ID} \
+  --seed ${SEED} \
+  --resume_path ${CKPT_PATH} \
+  --use_redq True \
+  --utd 4 \
+  --reward_scale ${R_SCALE} \
+  --reward_bias ${R_BIAS} \
+  --num_offline_steps ${num_offline_steps} \
+  --num_online_steps ${num_online_steps} \
+  --save_interval ${save_interval} \
+  --online_sampling_method append \
+  --exp_name calql_ensemble_highutd_append \
+  --save_dir ${SAVE_ROOT} \
+  2>&1 | tee -a ${SAVE_ROOT}/calql_${ENV_ID}_seed${SEED}.log
+
+echo "[GPU ${GPU_ID}] WSRL (SAC) from CALQL-20K for ${ENV_ID}"
 python3 finetune.py \
   --agent sac \
   --config experiments/configs/train_config.py:locomotion_wsrl \
@@ -62,14 +106,15 @@ python3 finetune.py \
   --reward_scale ${R_SCALE} \
   --reward_bias ${R_BIAS} \
   --resume_path ${CKPT_PATH} \
-  --num_offline_steps 300000 \
+  --num_offline_steps ${num_offline_steps} \
+  --num_online_steps ${num_online_steps} \
   --utd 4 \
   --batch_size 1024 \
   --warmup_steps 5000 \
   --exp_name wsrl \
   --save_dir ${SAVE_ROOT} | cat
 
-echo "[GPU ${GPU_ID}] WSRL (SAC-BC) from CALQL-300K for ${ENV_ID}"
+echo "[GPU ${GPU_ID}] WSRL (SAC-BC) from CALQL-20K for ${ENV_ID}"
 python3 finetune.py \
   --agent sac_bc \
   --config experiments/configs/train_config.py:locomotion_wsrl \
@@ -79,18 +124,19 @@ python3 finetune.py \
   --reward_scale ${R_SCALE} \
   --reward_bias ${R_BIAS} \
   --resume_path ${CKPT_PATH} \
-  --num_offline_steps 300000 \
+  --num_offline_steps ${num_offline_steps} \
+  --num_online_steps ${num_online_steps} \
   --utd 4 \
   --batch_size 1024 \
   --warmup_steps 5000 \
   --config.agent_kwargs.bc_steps=300000 \
   --config.agent_kwargs.bc_lambda_init=1 \
   --config.agent_kwargs.bc_lambda_schedule=adaptive \
-  --config.agent_kwargs.bc_constraint_mode=q_drop \
+  --config.agent_kwargs.bc_constraint_mode=j_drop \
   --config.agent_kwargs.bc_lagrangian_lr=1e-4 \
   --config.agent_kwargs.bc_drop_metric=relative \
   --config.agent_kwargs.bc_perf_source=success \
-  --config.agent_kwargs.bc_constraint=0.2 \
+  --config.agent_kwargs.bc_constraint=0.1 \
   --config.agent_kwargs.bc_target=dataset \
   --config.agent_kwargs.bc_weight_mode=none \
   --config.agent_kwargs.bc_uncert_action_source=dataset \
