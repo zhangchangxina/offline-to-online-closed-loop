@@ -44,9 +44,33 @@ class SACBCWithTargetAgent(SACAgent):
 
     # Optional offline teacher params loaded from a checkpoint (not part of JAX PyTree)
     offline_teacher_params: Optional[Params] = nonpytree_field(default=None)
+    # Optional offline critic params loaded from a checkpoint (not part of JAX PyTree)
+    offline_critic_params: Optional[Params] = nonpytree_field(default=None)
 
     def set_offline_teacher_params(self, teacher_params: Params):
         return self.replace(offline_teacher_params=teacher_params)
+    
+    def set_offline_critic_params(self, critic_params: Params):
+        return self.replace(offline_critic_params=critic_params)
+
+    @staticmethod
+    def _normalize_bc_lambda_schedule(schedule: str) -> str:
+        schedule_lower = str(schedule).strip().lower()
+        if schedule_lower in ("lagrangian", "lagrange", "lag"):
+            return "lagrangian"
+        if schedule_lower in ("augmented_lagrangian", "aug_lagrangian", "aug-lagrangian", "augmented"):
+            return "aug_lagrangian"
+        allowed = {
+            "fixed",
+            "linear",
+            "exp",
+            "exp_decay",
+            "fast_slow",
+            "external",
+        }
+        if schedule_lower in allowed:
+            return schedule_lower
+        raise ValueError("Unsupported bc_lambda_schedule value")
 
     # ------------------------
     # Lagrange for BC strength
@@ -67,63 +91,84 @@ class SACBCWithTargetAgent(SACAgent):
             value = jnp.minimum(value, jnp.asarray(lam_max, dtype=jnp.float32))
         return value
 
+
     def _compute_td_q_delta(
         self,
-        batch,
+        batch: Batch,
         rng: PRNGKey,
         *,
         policy_grad_params: Optional[Params] = None,
     ) -> jax.Array:
         """
-        Compute per-sample TD error q_delta = r + γ Q_target(s', a') - Q(s, a).
+        Compute per-sample temporal-difference error:
+            q_delta = r + γ Q_target(s', a') - Q(s, a)
 
-        - Uses dataset actions for Q(s, a)
-        - Uses current policy for a' with optional grad params
-        - Uses target critic for Q_target
+        The next actions are sampled from the policy parameters provided via
+        `policy_grad_params` (defaults to the agent parameters).
         """
         batch_size = batch["rewards"].shape[0]
-        rng, next_action_sample_key, q_now_rng, q_next_rng = jax.random.split(rng, 4)
+        rng, sample_rng = jax.random.split(rng)
 
-        # Q(s, a) with current critic on dataset actions
-        qs_now = self.forward_critic(
-            batch["observations"],
-            batch["actions"],
-            rng=q_now_rng,
-        )
-        q_now = qs_now.min(axis=0)
-
-        # Sample a' from current policy on s'
         sample_n_actions = (
             self.config["n_actions"] if self.config["max_target_backup"] else None
         )
         next_actions, next_actions_log_probs = self.forward_policy_and_sample(
             batch["next_observations"],
-            next_action_sample_key,
+            sample_rng,
             grad_params=policy_grad_params,
             repeat=sample_n_actions,
         )
+        if sample_n_actions:
+            chex.assert_shape(
+                next_actions_log_probs, (batch_size, sample_n_actions)
+            )
+        else:
+            chex.assert_shape(next_actions_log_probs, (batch_size,))
 
-        # Q_target(s', a') with target critic
-        qs_next = self.forward_target_critic(
+        rng, target_rng = jax.random.split(rng)
+        target_next_qs = self.forward_target_critic(
             batch["next_observations"],
             next_actions,
-            rng=q_next_rng,
+            rng=target_rng,
         )
-        q_next_min = qs_next.min(axis=0)
-        chex.assert_equal_shape([q_next_min, next_actions_log_probs])
-        q_next_min = self._process_target_next_qs(
-            q_next_min, next_actions_log_probs
-        )
-        q_next_min = jax.lax.stop_gradient(q_next_min)
 
-        # TD error per sample
-        q_delta = (
-            batch["rewards"]
-            + self.config["discount"] * batch["masks"] * q_next_min
-            - q_now
+        critic_subsample = self.config["critic_subsample_size"]
+        if critic_subsample is not None:
+            rng, subsample_key = jax.random.split(rng)
+            subsample_indices = jax.random.randint(
+                subsample_key,
+                (critic_subsample,),
+                0,
+                self.config["critic_ensemble_size"],
+            )
+            target_next_qs = target_next_qs[subsample_indices]
+
+        target_next_min_q = target_next_qs.min(axis=0)
+        target_next_min_q = self._process_target_next_qs(
+            target_next_min_q,
+            next_actions_log_probs,
         )
-        chex.assert_shape(q_delta, (batch_size,))
-        return q_delta
+        target_q = (
+            batch["rewards"]
+            + self.config["discount"] * batch["masks"] * target_next_min_q
+        )
+        chex.assert_shape(target_q, (batch_size,))
+
+        rng, critic_rng = jax.random.split(rng)
+        predicted_qs = self.forward_critic(
+            batch["observations"],
+            batch["actions"],
+            rng=critic_rng,
+        )
+        chex.assert_shape(
+            predicted_qs, (self.config["critic_ensemble_size"], batch_size)
+        )
+        current_q = predicted_qs.mean(axis=0)
+        chex.assert_shape(current_q, (batch_size,))
+
+        q_delta = target_q - current_q
+        return jax.lax.stop_gradient(q_delta)
+
 
     def policy_loss_fn(self, batch, params: Params, rng: PRNGKey):
         batch_size = batch["rewards"].shape[0]
@@ -195,7 +240,8 @@ class SACBCWithTargetAgent(SACAgent):
 
         # Optional BC regularization (supports dataset or actor_target as teacher, and TD-weighted coefficient)
         # Online-only gating in a JAX-traceable way
-        bc_lambda_schedule = self.config.get("bc_lambda_schedule", "fixed")
+        bc_lambda_schedule_raw = self.config.get("bc_lambda_schedule", "fixed")
+        bc_lambda_schedule = self._normalize_bc_lambda_schedule(bc_lambda_schedule_raw)
         # Unify BC activation to outer (environment) steps
         start_val = jnp.asarray(int(FLAGS.num_offline_steps), dtype=jnp.int32)
         steps_val = jnp.asarray(int(self.config["bc_steps"]), dtype=jnp.int32)
@@ -207,7 +253,7 @@ class SACBCWithTargetAgent(SACAgent):
         utd_val = jnp.asarray(int(FLAGS.utd), dtype=jnp.int32)
         utd_effective = jnp.where(utd_val > 1, utd_val + 1, jnp.asarray(1, dtype=jnp.int32))
         outer_step = jnp.minimum(inner_step, offline_end) + jnp.maximum(inner_step - offline_end, 0) // utd_effective
-        if bc_lambda_schedule == "adaptive":
+        if bc_lambda_schedule in ("lagrangian", "aug_lagrangian"):
             # Use Lagrange multiplier as dynamic coefficient (clamped to >= 0)
             bc_lambda = jnp.maximum(0.0, jnp.asarray(self.forward_bc_lagrange(), dtype=jnp.float32))
         elif bc_lambda_schedule == "external":
@@ -231,7 +277,6 @@ class SACBCWithTargetAgent(SACAgent):
         else:
             bc_lambda = jnp.asarray(float(self.config["bc_lambda_init"]), dtype=jnp.float32)
 
-    
         # Online gating semantics (simplified):
         # len > 0 -> [start, start+len)
         bc_enabled_bool = (outer_step >= start_val) & (outer_step < (start_val + steps_val))
@@ -343,7 +388,13 @@ class SACBCWithTargetAgent(SACAgent):
             else:
                 # td / td_inverse: need q_delta per sample
                 q_delta = self._compute_td_q_delta(batch, td_rng, policy_grad_params=params)
-                base = jnp.abs(q_delta)
+                use_abs = bool(self.config.get("bc_td_weight_abs", True))
+                base = jnp.abs(q_delta) if use_abs else q_delta
+                info["bc_td_delta_mean"] = q_delta.mean()
+                info["bc_td_delta_std"] = q_delta.std()
+                if not bool(self.config.get("light_logging", True)):
+                    info["bc_td_delta_min"] = q_delta.min()
+                    info["bc_td_delta_max"] = q_delta.max()
 
             eps = float(self.config.get("bc_weight_eps", 1e-3))
             if mode.endswith("inverse"):
@@ -402,6 +453,8 @@ class SACBCWithTargetAgent(SACAgent):
             weights = jnp.ones((batch_size,), dtype=bc_per.dtype)
             bc_loss = bc_per.mean()
 
+    
+        
         # Combine with original SAC actor loss using a mask so it's traceable
         combine_mode = self.config.get("bc_combine_mode", "sum")  # "sum" | "interpolate"
         if combine_mode == "interpolate":
@@ -409,6 +462,15 @@ class SACBCWithTargetAgent(SACAgent):
             actor_loss = actor_loss * (1.0 - mix) + bc_loss * mix
         else:
             actor_loss = actor_loss + (bc_lambda * bc_loss * bc_mask)
+        # Initialize aug_penalty for all schedules to avoid UnboundLocalError
+        aug_penalty = jnp.asarray(0.0, dtype=jnp.float32)
+        if bc_lambda_schedule == "aug_lagrangian":
+            aug_coeff_val = self.config.get("bc_aug_penalty", None)
+            if aug_coeff_val is None:
+                aug_coeff_val = self.config.get("bc_aug_coeff", 1.0)
+            aug_coeff = jnp.asarray(aug_coeff_val, dtype=jnp.float32)
+            aug_penalty = 0.5 * aug_coeff * bc_loss
+            actor_loss = actor_loss + aug_penalty * bc_mask
 
         # Log diagnostics (mask bc_loss so it's 0 outside the online window)
         info["bc_loss"] = bc_loss
@@ -422,6 +484,17 @@ class SACBCWithTargetAgent(SACAgent):
         info["actor_loss"] = actor_loss
         info["bc_mask"] = bc_mask
         info["bc_lambda"] = bc_lambda
+        info["bc_lambda_schedule_code"] = jnp.asarray({
+            "fixed": 0,
+            "lagrangian": 1,
+            "aug_lagrangian": 2,
+            "external": 3,
+            "linear": 4,
+            "exp": 5,
+            "exp_decay": 6,
+            "fast_slow": 7,
+        }.get(bc_lambda_schedule, -1), dtype=jnp.int32)
+        info["bc_aug_penalty"] = aug_penalty * bc_mask
         # Reduce logging payload to scalars for performance
         info["log_probs_mean"] = log_probs.mean()
         # Ensure no large arrays leak into logs
@@ -527,7 +600,8 @@ class SACBCWithTargetAgent(SACAgent):
                 base = jnp.var(qs_eval, axis=0) if (measure == "var") else jnp.std(qs_eval, axis=0)
             else:
                 q_delta = self._compute_td_q_delta(batch, td_rng, policy_grad_params=policy_grad_params)
-                base = jnp.abs(q_delta)
+                use_abs = bool(self.config.get("bc_td_weight_abs", True))
+                base = jnp.abs(q_delta) if use_abs else q_delta
 
             eps = float(self.config.get("bc_weight_eps", 1e-3))
             if mode.endswith("inverse"):
@@ -587,8 +661,11 @@ class SACBCWithTargetAgent(SACAgent):
         - bc_constraint_mode = "q_drop": E[max(0, Q_ref - Q_pi)] <= bc_constraint
         We use the multiplier both as the BC coefficient and as the dual variable.
         """
-        # Gate: only when using adaptive schedule
-        if self.config.get("bc_lambda_schedule", "fixed") != "adaptive":
+        # Gate: only when using Lagrangian-driven schedules
+        schedule = self._normalize_bc_lambda_schedule(
+            self.config.get("bc_lambda_schedule", "fixed")
+        )
+        if schedule not in ("lagrangian", "aug_lagrangian"):
             return 0.0, {"bc_lagrange_loss": 0.0}
 
         mode = str(self.config.get("bc_constraint_mode", "bc_loss"))
@@ -703,7 +780,21 @@ class SACBCWithTargetAgent(SACAgent):
                 ref_actions = jnp.clip(batch["actions"], -0.99, 0.99)
 
             ref_actions = jnp.clip(ref_actions, -0.99, 0.99)
-            qs_ref = self.forward_critic(batch["observations"], ref_actions, rng=q_ref_rng)
+            # Choose which critic to evaluate Q_ref with
+            # bc_qdrop_q_source: "current" | "target" | "offline"
+            q_src = str(self.config.get("bc_qdrop_q_source", "current"))
+            if q_src == "target":
+                qs_ref = self.forward_target_critic(batch["observations"], ref_actions, rng=q_ref_rng)
+            elif q_src == "offline":
+                offline_params = getattr(self, "offline_critic_params", None)
+                if offline_params is None:
+                    # Fallback to target critic if offline params are not provided
+                    offline_params = self.state.target_params
+                qs_ref = self.forward_critic(
+                    batch["observations"], ref_actions, rng=q_ref_rng, grad_params=offline_params
+                )
+            else:
+                qs_ref = self.forward_critic(batch["observations"], ref_actions, rng=q_ref_rng)
             q_ref = qs_ref.min(axis=0)
             chex.assert_shape(q_ref, (batch_size,))
 
@@ -722,7 +813,7 @@ class SACBCWithTargetAgent(SACAgent):
                 # Absolute drop in Q units
                 q_drop = q_drop_raw
             # Optionally adapt the constraint to the batch scale
-            adapt_mode = str(self.config.get("bc_qdrop_adaptive_mode", "none"))
+            adapt_mode = str(self.config.get("bc_qdrop_dynamic_mode", "none"))
             if adapt_mode == "batch_quantile":
                 q = float(self.config.get("bc_qdrop_quantile", 0.9))
                 q = jnp.clip(jnp.asarray(q, dtype=jnp.float32), 0.0, 1.0)
@@ -810,14 +901,17 @@ class SACBCWithTargetAgent(SACAgent):
         return bc_penalty, info
 
     def loss_fns(self, batch):
-        """Override to include bc_lagrange loss when adaptive schedule is enabled."""
+        """Override to include bc_lagrange loss when a Lagrangian schedule is enabled."""
         from functools import partial as _partial
         loss_map = {
             "critic": _partial(self.critic_loss_fn, batch),
             "actor": _partial(self.policy_loss_fn, batch),
             "temperature": _partial(self.temperature_loss_fn, batch),
         }
-        if self.config.get("bc_lambda_schedule", "fixed") == "adaptive":
+        schedule = self._normalize_bc_lambda_schedule(
+            self.config.get("bc_lambda_schedule", "fixed")
+        )
+        if schedule in ("lagrangian", "aug_lagrangian"):
             loss_map["bc_lagrange"] = _partial(self.bc_lagrange_loss_fn, batch)
         return loss_map
 
@@ -877,10 +971,10 @@ class SACBCWithTargetAgent(SACAgent):
         bc_lambda_schedule: str = "fixed",
     ) -> Tuple["SACBCWithTargetAgent", dict]:
         """
-        High-UTD updates with optional bc_lagrange update on the final step when adaptive schedule is enabled.
+        High-UTD updates with optional bc_lagrange update on the final step when a Lagrangian schedule is enabled.
 
         - Perform `utd_ratio` critic-only updates on minibatches.
-        - Then one joint update for actor/temperature and, if adaptive, bc_lagrange.
+        - Then one joint update for actor/temperature and, if Lagrangian-based, bc_lagrange.
         """
         batch_size = batch["rewards"].shape[0]
         assert (
@@ -915,10 +1009,11 @@ class SACBCWithTargetAgent(SACAgent):
             except Exception:
                 pass
 
-        # Final joint update: actor/temperature (+ bc_lagrange if adaptive schedule is enabled)
+        # Final joint update: actor/temperature (+ bc_lagrange if Lagrangian schedule is enabled)
+        normalized_schedule = self._normalize_bc_lambda_schedule(bc_lambda_schedule)
         final_networks = (
             frozenset({"actor", "temperature", "bc_lagrange"})
-            if (bc_lambda_schedule == "adaptive")
+            if normalized_schedule in ("lagrangian", "aug_lagrangian")
             else frozenset({"actor", "temperature"})
         )
 
@@ -959,7 +1054,7 @@ class SACBCWithTargetAgent(SACAgent):
         critic_subsample_size: Optional[int] = None,
         temperature_init: float = 1.0,
         # BC Lagrange options
-        bc_lambda_schedule: str = "fixed",  # "fixed" | "adaptive"
+        bc_lambda_schedule: str = "fixed",  # "fixed" | "lagrangian" | "aug_lagrangian" | "linear" | "exp" | "exp_decay" | "fast_slow" | "external"
         bc_constraint: float = 0.1,
         bc_lagrange_optimizer_kwargs: dict = {
             "learning_rate": 3e-4,
@@ -967,7 +1062,7 @@ class SACBCWithTargetAgent(SACAgent):
         **kwargs,
     ):
         """
-        Create a SAC-BC agent with optional adaptive Lagrangian to control the BC coefficient.
+        Create a SAC-BC agent with optional Lagrangian control to modulate the BC coefficient.
         """
 
         if shared_encoder:
@@ -1007,8 +1102,9 @@ class SACBCWithTargetAgent(SACAgent):
             name="temperature",
         )
 
-        # Optionally include bc_lagrange module when schedule is adaptive
-        need_bc_module = (bc_lambda_schedule == "adaptive")
+        # Optionally include bc_lagrange module when schedule requires it
+        normalized_schedule = cls._normalize_bc_lambda_schedule(bc_lambda_schedule)
+        need_bc_module = normalized_schedule in ("lagrangian", "aug_lagrangian")
         if need_bc_module:
             # Initialize from provided bc_lambda_init
             init_val = float(kwargs["bc_lambda_init"])  # must be provided
@@ -1082,7 +1178,7 @@ class SACBCWithTargetAgent(SACAgent):
             n_actions=kwargs.get("n_actions", 10),
             max_target_backup=kwargs.get("max_target_backup", False),
             # BC Lagrange
-            bc_lambda_schedule=bc_lambda_schedule,
+            bc_lambda_schedule=normalized_schedule,
             bc_constraint=bc_constraint,
         )
 

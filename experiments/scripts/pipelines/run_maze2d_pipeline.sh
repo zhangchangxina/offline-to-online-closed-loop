@@ -22,6 +22,10 @@ PROJECT_DIR="wsrl"
 R_SCALE=1.0
 R_BIAS=0.0
 
+num_offline_steps=300000
+num_online_steps=300000
+save_interval=100000
+
 echo "[GPU ${GPU_ID}] CALQL (REDQ10, UTD=4) pretrain+online for ${ENV_ID}"
 python3 finetune.py \
   --agent calql \
@@ -32,15 +36,15 @@ python3 finetune.py \
   --utd 4 \
   --reward_scale ${R_SCALE} \
   --reward_bias ${R_BIAS} \
-  --num_offline_steps 500000 \
-  --save_interval 100000 \
+  --num_offline_steps ${num_offline_steps} \
+  --save_interval ${save_interval} \
   --exp_name calql_ensemble_highutd \
   --save_dir ${SAVE_ROOT} \
   2>&1 | tee -a ${SAVE_ROOT}/calql_${ENV_ID}_seed${SEED}.log
 
 EXP_DESC="calql_ensemble_highutd_${ENV_ID}_calql_seed${SEED}"
 RUN_DIR=$(ls -1dt ${SAVE_ROOT}/${PROJECT_DIR}/${EXP_DESC}_* | head -n 1)
-CKPT_PATH="${RUN_DIR}/checkpoint_500000"
+CKPT_PATH="${RUN_DIR}/checkpoint_${num_offline_steps}"
 echo "[GPU ${GPU_ID}] Using checkpoint: ${CKPT_PATH}"
 
 echo "[GPU ${GPU_ID}] WSRL (SAC) from CALQL-500K for ${ENV_ID}"
@@ -53,7 +57,7 @@ python3 finetune.py \
   --reward_scale ${R_SCALE} \
   --reward_bias ${R_BIAS} \
   --resume_path ${CKPT_PATH} \
-  --num_offline_steps 500000 \
+  --num_offline_steps ${num_offline_steps} \
   --utd 4 \
   --batch_size 1024 \
   --warmup_steps 5000 \
@@ -70,13 +74,13 @@ python3 finetune.py \
   --reward_scale ${R_SCALE} \
   --reward_bias ${R_BIAS} \
   --resume_path ${CKPT_PATH} \
-  --num_offline_steps 500000 \
+  --num_offline_steps ${num_offline_steps} \
   --utd 4 \
   --batch_size 1024 \
   --warmup_steps 5000 \
   --config.agent_kwargs.bc_steps=500000 \
   --config.agent_kwargs.bc_lambda_init=1 \
-  --config.agent_kwargs.bc_lambda_schedule=adaptive \
+  --config.agent_kwargs.bc_lambda_schedule=lagrangian \
   --config.agent_kwargs.bc_constraint_mode=q_drop \
   --config.agent_kwargs.bc_lagrangian_lr=1e-4 \
   --config.agent_kwargs.bc_drop_metric=relative \

@@ -7,13 +7,11 @@ from functools import partial
 from typing import Optional, Tuple, Union
 
 import chex
-import distrax
 import flax
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
-import optax
-from ml_collections import ConfigDict
+from absl import flags
 
 from wsrl.agents.sac import SACAgent
 from wsrl.common.common import JaxRLTrainState, ModuleDict, nonpytree_field
@@ -24,73 +22,54 @@ from wsrl.networks.lagrange import GeqLagrangeMultiplier, LeqLagrangeMultiplier
 from wsrl.networks.mlp import MLP
 
 
+FLAGS = flags.FLAGS
+
+
 class ClosedLoopSACAgent(SACAgent):
     """
     SAC agent with closed-loop update mechanism.
     Implements alignment loss and Lagrangian constraints for better training stability.
     This can be used with any warm-start strategy including WSRL.
     """
+    # Optional offline critic params loaded from a checkpoint (not part of JAX PyTree)
+    offline_critic_params: Optional[Params] = nonpytree_field(default=None)
+
+    @staticmethod
+    def _normalize_lambda_schedule(schedule: str) -> str:
+        schedule_lower = str(schedule).strip().lower()
+        if schedule_lower in ("lagrangian", "lagrange", "lag"):
+            return "lagrangian"
+        if schedule_lower in ("augmented_lagrangian", "aug_lagrangian", "aug-lagrangian", "augmented"):
+            return "aug_lagrangian"
+        allowed = {
+            "fixed",
+            "linear",
+            "exp",
+            "exp_decay",
+            "fast_slow",
+            "external",
+        }
+        if schedule_lower in allowed:
+            return schedule_lower
+        raise ValueError("Unsupported lambda_schedule value")
+
+    def set_offline_critic_params(self, critic_params: Params):
+        return self.replace(offline_critic_params=critic_params)
     
     def forward_align_lagrange(self, *, grad_params: Optional[Params] = None):
         """
         Forward pass for the alignment Lagrange multiplier
         """
-        return self.state.apply_fn(
+        value = self.state.apply_fn(
             {"params": grad_params or self.state.params},
             name="align_lagrange",
         )
-
-    def _compute_align_loss(self, batch, rng: PRNGKey, grad_params: Optional[Params] = None):
-        """
-        Compute alignment loss for closed-loop update mechanism.
-        This implements the constraint E[q_delta^2] <= c where q_delta = r + γQ(s',a') - Q(s,a)
-        """
-        batch_size = batch["rewards"].shape[0]
-        rng, next_action_sample_key, q_now_rng, q_next_rng = jax.random.split(rng, 4)
-        
-        # Get current Q values
-        qs_now = self.forward_critic(
-            batch["observations"],
-            batch["actions"],
-            rng=q_now_rng,
-        )
-        q_now = qs_now.min(axis=0)
-        
-        # Get next Q values with target network
-        # Sample next actions with current actor params to enable gradients to the actor
-        sample_n_actions = (
-            self.config["n_actions"] if self.config["max_target_backup"] else None
-        )
-        next_actions, next_actions_log_probs = self.forward_policy_and_sample(
-            batch["next_observations"],
-            next_action_sample_key,
-            grad_params=grad_params,
-            repeat=sample_n_actions,
-        )
-        qs_next = self.forward_target_critic(
-        # qs_next = self.forward_critic(
-            batch["next_observations"],
-            next_actions,
-            rng=q_next_rng,
-        )
-        q_next_min = qs_next.min(axis=0)
-        # Ensure target next Qs shape matches policy sampling setup
-        # When multiple actions are sampled (n_actions), reduce along that axis
-        chex.assert_equal_shape([q_next_min, next_actions_log_probs])
-        q_next_min = self._process_target_next_qs(
-            q_next_min, next_actions_log_probs
-        )
-        # Do not propagate gradients through q_next_min in align_loss
-        q_next_min = jax.lax.stop_gradient(q_next_min)
-        reward_term = batch["rewards"]
-        
-        # Compute Q delta (mask terminals)
-        q_delta = reward_term + self.config["discount"] * batch["masks"] * q_next_min - q_now
-        
-        # Alignment loss: E[q_delta^2]
-        align_loss = jnp.mean(q_delta ** 2)
-        
-        return align_loss, q_delta
+        # Project to feasible set: non-negative and optionally clipped to lambda_clip
+        value = jnp.maximum(value, jnp.asarray(0.0, dtype=jnp.float32))
+        lam_max = float(self.config.get("lambda_clip", 10.0))
+        if lam_max > 0.0:
+            value = jnp.minimum(value, jnp.asarray(lam_max, dtype=jnp.float32))
+        return value
 
     def policy_loss_fn(self, batch, params: Params, rng: PRNGKey):
         """
@@ -98,6 +77,12 @@ class ClosedLoopSACAgent(SACAgent):
         Implements the Lagrangian objective for constraint E[q_delta^2] <= c
         """
         batch_size = batch["rewards"].shape[0]
+        # When alignment is effectively disabled, delegate to base SAC for exact parity
+        schedule = self._normalize_lambda_schedule(self.config.get("lambda_schedule", "fixed"))
+        lam_align_init_val = float(self.config.get("lam_align", 0.0))
+        lam_external_val = float(self.config.get("align_lambda_external", self.config.get("lambda_external", 0.0)))
+        if (schedule not in ("lagrangian", "aug_lagrangian")) and (lam_align_init_val <= 0.0) and (lam_external_val <= 0.0):
+            return super().policy_loss_fn(batch, params, rng)
         temperature = self.forward_temperature()
 
         rng, policy_rng, sample_rng, critic_pred_rng, critic_new_rng, align_rng = jax.random.split(rng, 6)
@@ -124,107 +109,119 @@ class ClosedLoopSACAgent(SACAgent):
             action_distributions.log_prob(jnp.clip(batch["actions"], -0.99, 0.99))
         )
         actor_objective = predicted_q
-        standard_actor_loss = -jnp.mean(actor_objective) + jnp.mean(temperature * log_probs)
 
-        # If closed-loop is disabled, behave like standard SAC (match offline speed)
-        if not self.config.get("closed_loop_enabled", False):
-            info = {
-                "actor_loss": standard_actor_loss,
-                "actor_nll": nll_objective,
-                "temperature": temperature,
-                "entropy": -log_probs.mean(),
-                "log_probs": log_probs,
-                "actions_mse": ((actions - batch["actions"]) ** 2).sum(axis=-1).mean(),
-                "dataset_rewards": batch["rewards"],
-                "mc_returns": batch.get("mc_returns", None),
-                "actions": actions,
-            }
-            # optionally add BC regularization
-            if self.config.get("bc_loss_weight", 0.0) > 0:
-                bc_loss = -action_distributions.log_prob(batch["actions"]).mean()
-                info["bc_loss"] = bc_loss
-                info["actor_bc_loss_weight"] = self.config["bc_loss_weight"]
-                actor_loss = (
-                    standard_actor_loss * (1 - self.config["bc_loss_weight"]) +
-                    bc_loss * self.config["bc_loss_weight"]
-                )
-                info["actor_loss"] = actor_loss
-                return actor_loss, info
-            return standard_actor_loss, info
+        # Individual terms
+        q_term = -jnp.mean(actor_objective)
+        entropy_term = jnp.mean(temperature * log_probs)
+        standard_actor_loss = q_term + entropy_term
 
-        # Closed-loop update mechanism
-        # Choose between two policy loss variants: 'align' (default) or 'q_trust'
-        loss_variant = self.config.get("policy_loss_variant", "align")
-        loss_variant_code = jnp.asarray(0 if loss_variant == "align" else 1, dtype=jnp.int32)
-        # Will compute TD error (q_delta) only when needed:
-        # - Always for 'align' variant
-        # - For 'q_trust' variant only before align_steps
-        # Get current Q values for the new policy
-        qs_new = self.forward_critic(
+
+        # Q-drop align loss using offline-saved critic as reference on dataset actions
+        # q_pi: current critic on current policy actions
+        q_pi = predicted_q
+        # Reference actions: dataset actions
+        ref_actions = jnp.clip(batch["actions"], -0.99, 0.99)
+        # Prefer explicitly provided offline critic params; fallback to target params
+        offline_params = getattr(self, "offline_critic_params", None)
+        # if offline_params is None:
+        #     offline_params = self.state.target_params
+        qs_ref = self.forward_critic(
             batch["observations"],
-            actions,
+            ref_actions,
             rng=critic_new_rng,
+            grad_params=offline_params,
         )
-        q_new = qs_new.min(axis=0)
-        # TD-based trust for Q term (variant: 'q_trust'): larger |q_delta| => smaller trust
-        q_term_unweighted = (-q_new).mean()
-        # Apply q_trust only before align_steps (optionally offset by lam_eff_linear_start_step)
-        steps = self.config.get("align_steps", 100000)
-        start = self.config.get("lam_eff_linear_start_step", 0)
-        eff_step = jnp.maximum(self.state.step - start, 0)
-        use_q_trust_flag = jnp.asarray(1 if loss_variant == "q_trust" else 0, dtype=jnp.int32)
-        is_align_flag = jnp.asarray(1 if loss_variant == "align" else 0, dtype=jnp.int32)
+        q_ref = qs_ref.min(axis=0)
+        q_drop = q_ref - q_pi
+        # Penalize only positive drops
+        align_loss = jnp.mean(jnp.maximum(q_drop, 0.0))
 
-        def _compute_td_fn(_):
-            return self._compute_align_loss(batch, align_rng, params)
 
-        def _skip_td_fn(_):
-            return jnp.asarray(0.0, dtype=jnp.float32), jnp.zeros_like(q_new)
+        # Lambda schedule (fixed | linear | exp | exp_decay | fast_slow | lagrangian | aug_lagrangian | external)
+        lambda_schedule_raw = self.config.get("lambda_schedule", "fixed")
+        lambda_schedule = self._normalize_lambda_schedule(lambda_schedule_raw)
 
-        need_td = jnp.logical_or(is_align_flag == 1, jnp.logical_and(use_q_trust_flag == 1, eff_step < steps))
-        align_loss, q_delta = jax.lax.cond(need_td, _compute_td_fn, _skip_td_fn, operand=None)
+        lam_align_init = jnp.asarray(self.config.get("lam_align", 1.0), dtype=jnp.float32)
+        align_steps = int(self.config.get("align_steps", 0))
+        steps_val = jnp.asarray(align_steps, dtype=jnp.int32)
+        offline_end = jnp.asarray(int(getattr(FLAGS, "num_offline_steps", 0)), dtype=jnp.int32)
+        start_offset = jnp.asarray(int(self.config.get("lam_eff_linear_start_step", 0)), dtype=jnp.int32)
+        start_val = offline_end + start_offset
+        inner_step = self.state.step.astype(jnp.int32)
+        utd_val = jnp.asarray(int(getattr(FLAGS, "utd", 1)), dtype=jnp.int32)
+        utd_effective = jnp.where(utd_val > 1, utd_val + 1, jnp.asarray(1, dtype=jnp.int32))
+        outer_step = jnp.minimum(inner_step, offline_end) + jnp.maximum(inner_step - offline_end, 0) // utd_effective
 
-        def _q_term_with_trust(_):
-            q_trust_beta = jnp.asarray(self.config.get("q_trust_beta", 1.0), dtype=jnp.float32)
-            weight = 1.0 / (1.0 + q_trust_beta * (q_delta ** 2))
-            weight = jax.lax.stop_gradient(weight)
-            return (-(weight * q_new)).mean(), weight
+        if lambda_schedule in ("lagrangian", "aug_lagrangian"):
+            lam_align = jnp.maximum(0.0, jnp.asarray(self.forward_align_lagrange(), dtype=jnp.float32))
+        elif lambda_schedule == "external":
+            lam_align = jnp.asarray(
+                float(
+                    self.config.get(
+                        "align_lambda_external",
+                        self.config.get("lambda_external", self.config.get("lam_align", 1.0)),
+                    )
+                ),
+                dtype=jnp.float32,
+            )
+        elif lambda_schedule == "linear":
+            lam_init = jnp.maximum(0.0, lam_align_init)
+            eff_step = jnp.maximum(outer_step - start_val, 0)
+            steps_safe = jnp.maximum(steps_val, jnp.asarray(1, dtype=jnp.int32))
+            progress = jnp.clip(
+                eff_step.astype(jnp.float32) / steps_safe.astype(jnp.float32),
+                0.0,
+                1.0,
+            )
+            lam_align = lam_init * (1.0 - progress)
+        elif lambda_schedule in ("exp", "exp_decay", "fast_slow"):
+            lam_init = jnp.maximum(0.0, lam_align_init)
+            eff_step = jnp.maximum(outer_step - start_val, 0)
+            steps_safe = jnp.maximum(steps_val, jnp.asarray(1, dtype=jnp.int32))
+            progress = jnp.clip(
+                eff_step.astype(jnp.float32) / steps_safe.astype(jnp.float32),
+                0.0,
+                1.0,
+            )
+            decay_rate = jnp.asarray(float(self.config.get("lambda_exp_rate", 5.0)), dtype=jnp.float32)
+            lam_align = lam_init * jnp.exp(-decay_rate * progress)
+        else:  # fixed
+            lam_align = jnp.maximum(0.0, lam_align_init)
 
-        def _q_term_without_trust(_):
-            return q_term_unweighted, jnp.ones_like(q_new)
+        lam_max = float(self.config.get("lambda_clip", -1.0))
+        if lam_max > 0.0:
+            lam_align = jnp.minimum(lam_align, jnp.asarray(lam_max, dtype=jnp.float32))
 
-        cond = jnp.logical_and(use_q_trust_flag == 1, eff_step < steps)
-        q_term, q_trust_weight = jax.lax.cond(cond, _q_term_with_trust, _q_term_without_trust, operand=None)
-        entropy_term = (temperature * log_probs).mean()
+        has_duration = steps_val > 0
+        align_enabled_bool = jnp.where(
+            has_duration,
+            (outer_step >= start_val) & (outer_step < (start_val + steps_val)),
+            outer_step >= start_val,
+        )
+        align_mask = align_enabled_bool.astype(jnp.float32)
 
-        # Compute lam_align with schedule: fixed | linear | adaptive (only used in 'align' variant)
-        if loss_variant == "align":
-            lam_align_init = jnp.asarray(self.config.get("lam_align", 1.0), dtype=jnp.float32)
-            schedule = self.config.get("lambda_schedule", "fixed")
-            # Precompute debug helpers for logging
-            steps = self.config.get("align_steps", 100000)
-            start = self.config.get("lam_eff_linear_start_step", 0)
-            eff_step = jnp.maximum(self.state.step - start, 0)
-            progress = jnp.minimum(eff_step, steps) / jnp.maximum(steps, 1)
+        align_aug_penalty = jnp.asarray(0.0, dtype=jnp.float32)
+        if lambda_schedule == "aug_lagrangian":
+            aug_coeff = jnp.asarray(self.config.get("align_aug_coeff", 1.0), dtype=jnp.float32)
+            align_aug_penalty = 0.5 * aug_coeff * align_loss
 
-            if schedule == "linear":
-                schedule_code = jnp.asarray(1, dtype=jnp.int32)
-                lam_align = jnp.maximum(0.0, lam_align_init * (1.0 - progress))
-            elif schedule == "adaptive":
-                schedule_code = jnp.asarray(2, dtype=jnp.int32)
-                lam_align = jnp.maximum(0.0, self.forward_align_lagrange())
-            else:
-                schedule_code = jnp.asarray(0, dtype=jnp.int32)
-                lam_align = jnp.maximum(0.0, lam_align_init)
-        else:
-            lam_align = jnp.asarray(0.0, dtype=jnp.float32)
-            schedule_code = jnp.asarray(3, dtype=jnp.int32)  # disabled in q_trust variant
+        policy_loss = standard_actor_loss + lam_align * align_loss * align_mask
+        if lambda_schedule == "aug_lagrangian":
+            policy_loss = policy_loss + align_aug_penalty * align_mask
 
-        # Final objective per variant
-        if loss_variant == "align":
-            policy_loss =  q_term + lam_align * align_loss + entropy_term
-        else:
-            policy_loss =  q_term + entropy_term
+        schedule_code = jnp.asarray(
+            {
+                "fixed": 0,
+                "lagrangian": 1,
+                "aug_lagrangian": 2,
+                "external": 3,
+                "linear": 4,
+                "exp": 5,
+                "exp_decay": 6,
+                "fast_slow": 7,
+            }.get(lambda_schedule, -1),
+            dtype=jnp.int32,
+        )
         
 
         info = {
@@ -250,181 +247,86 @@ class ClosedLoopSACAgent(SACAgent):
             "actions": actions,
             # Closed-loop specific metrics
             "align_loss": align_loss,
-            "q_delta_mean": jnp.mean(q_delta),
-            "q_delta_std": jnp.std(q_delta),
+            "q_drop_mean": jnp.mean(q_drop),
+            "q_drop_std": jnp.std(q_drop),
             "q_term": q_term,
             "entropy_term": entropy_term,
             "lam_align": lam_align,
             "lambda_schedule_code": schedule_code,
-            "policy_loss_variant_code": loss_variant_code,
+            "align_mask": align_mask,
+            "align_aug_penalty": align_aug_penalty * align_mask,
         }
-        if loss_variant == "q_trust":
-            info.update({
-                "q_term_unweighted": q_term_unweighted,
-                "q_trust_weight_mean": jnp.mean(q_trust_weight),
-                "q_trust_weight_min": jnp.min(q_trust_weight),
-                "q_trust_weight_max": jnp.max(q_trust_weight),
-            })
 
-        # Optional: per-term gradient norms for actor (and log_std head)
-        if self.config.get("log_actor_grad_terms", False):
-            log_std_layer_name = self.config.get("actor_log_std_layer_name", "Dense_1")
-
-            def q_term_only_fn(p):
-                # Recompute actions and q_new with same RNGs
-                dist = self.forward_policy(batch["observations"], rng=policy_rng, grad_params=p)
-                a, _ = dist.sample_and_log_prob(seed=sample_rng)
-                qs_new_local = self.forward_critic(batch["observations"], a, rng=critic_new_rng)
-                q_new_local = qs_new_local.min(axis=0)
-
-                if (self.config.get("policy_loss_variant", "align") == "q_trust") and (eff_step < steps):
-                    # Trust-weighted q-term
-                    # Reuse q_delta computation with same RNGs
-                    sample_n_actions = (
-                        self.config["n_actions"] if self.config["max_target_backup"] else None
-                    )
-                    next_actions, next_actions_log_probs = self.forward_policy_and_sample(
-                        batch["next_observations"], align_rng, grad_params=p, repeat=sample_n_actions,
-                    )
-                    qs_next_local = self.forward_target_critic(
-                        batch["next_observations"], next_actions, rng=critic_new_rng,
-                    )
-                    q_next_min_local = qs_next_local.min(axis=0)
-                    chex.assert_equal_shape([q_next_min_local, next_actions_log_probs])
-                    q_next_min_local = self._process_target_next_qs(q_next_min_local, next_actions_log_probs)
-                    q_now_local = self.forward_critic(batch["observations"], batch["actions"], rng=critic_new_rng).min(axis=0)
-                    q_delta_local = batch["rewards"] + self.config["discount"] * batch["masks"] * q_next_min_local - q_now_local
-                    q_trust_beta = jnp.asarray(self.config.get("q_trust_beta", 1.0), dtype=jnp.float32)
-                    weight_local = 1.0 / (1.0 + q_trust_beta * (q_delta_local ** 2))
-                    weight_local = jax.lax.stop_gradient(weight_local)
-                    return (-(weight_local * q_new_local)).mean()
-                else:
-                    # Unweighted q-term
-                    return (-(q_new_local)).mean()
-
-            def entropy_term_only_fn(p):
-                dist = self.forward_policy(batch["observations"], rng=policy_rng, grad_params=p)
-                _, lp = dist.sample_and_log_prob(seed=sample_rng)
-                return (temperature * lp).mean()
-
-            def align_term_only_fn(p):
-                # Only relevant if loss_variant == 'align'
-                if self.config.get("policy_loss_variant", "align") != "align":
-                    return jnp.asarray(0.0, dtype=jnp.float32)
-                align_loss_local, _ = self._compute_align_loss(batch, align_rng, p)
-                # Use current lam_align as constant weight
-                lam_local = jnp.maximum(0.0, (
-                    self.forward_align_lagrange(grad_params=p) if self.config.get("lambda_schedule", "fixed") == "adaptive" else lam_align
-                ))
-                lam_local = jax.lax.stop_gradient(lam_local)
-                return (lam_local * align_loss_local)
-
-            g_q_full = jax.grad(q_term_only_fn)(params)
-            g_ent_full = jax.grad(entropy_term_only_fn)(params)
-            g_align_full = jax.grad(align_term_only_fn)(params)
-
-            g_q_actor = g_q_full.get("actor", {})
-            g_ent_actor = g_ent_full.get("actor", {})
-            g_align_actor = g_align_full.get("actor", {})
-
-            info["actor_grad_norm_q"] = optax.global_norm(g_q_actor)
-            info["actor_grad_norm_entropy"] = optax.global_norm(g_ent_actor)
-            info["actor_grad_norm_align"] = optax.global_norm(g_align_actor)
-
-            try:
-                g_q_logstd = g_q_actor.get(log_std_layer_name, None)
-                g_ent_logstd = g_ent_actor.get(log_std_layer_name, None)
-                g_align_logstd = g_align_actor.get(log_std_layer_name, None)
-                info["actor_grad_norm_q_log_std"] = (
-                    optax.global_norm(g_q_logstd) if g_q_logstd is not None else jnp.array(0.0, jnp.float32)
-                )
-                info["actor_grad_norm_entropy_log_std"] = (
-                    optax.global_norm(g_ent_logstd) if g_ent_logstd is not None else jnp.array(0.0, jnp.float32)
-                )
-                info["actor_grad_norm_align_log_std"] = (
-                    optax.global_norm(g_align_logstd) if g_align_logstd is not None else jnp.array(0.0, jnp.float32)
-                )
-            except Exception:
-                info["actor_grad_norm_q_log_std"] = jnp.array(0.0, jnp.float32)
-                info["actor_grad_norm_entropy_log_std"] = jnp.array(0.0, jnp.float32)
-                info["actor_grad_norm_align_log_std"] = jnp.array(0.0, jnp.float32)
-
-            # Also log ||dQ/da|| as diagnostic
-            def q_min_mean_fn(a):
-                qs_local = self.forward_critic(batch["observations"], a, rng=critic_pred_rng)
-                return qs_local.min(axis=0).mean()
-
-            dq_da = jax.grad(q_min_mean_fn)(actions)
-            info["dq_da_l2_mean"] = jnp.linalg.norm(dq_da, axis=-1).mean()
-
-        # Optionally add BC regularization
-        if self.config.get("bc_loss_weight", 0.0) > 0:
-            bc_loss = -action_distributions.log_prob(batch["actions"]).mean()
-            info["bc_loss"] = bc_loss
-            info["actor_bc_loss_weight"] = self.config["bc_loss_weight"]
-            policy_loss = (
-                policy_loss * (1 - self.config["bc_loss_weight"]) +
-                bc_loss * self.config["bc_loss_weight"]
-            )
-            info["actor_loss"] = policy_loss
 
         return policy_loss, info
 
+
     def align_lagrange_loss_fn(self, batch, params: Params, rng: PRNGKey):
         """
-        Loss for the alignment Lagrange multiplier lambda_align, updated by positive_violation.
+        Lagrangian loss for alignment multiplier (lambda_align).
 
-        This mirrors the temperature loss update pattern: minimize multiplier * violation.
+        Constraint: E[align_loss] <= align_constraint, where align_loss uses q-drop.
         """
-        # Gate by schedule and closed_loop_enabled
-        lambda_schedule = self.config.get("lambda_schedule", "fixed")
-        if (not self.config.get("closed_loop_enabled", False)) or (lambda_schedule != "adaptive"):
+        # Only active when schedule is lagrangian
+        lambda_schedule = self._normalize_lambda_schedule(self.config.get("lambda_schedule", "fixed"))
+        if lambda_schedule not in ("lagrangian", "aug_lagrangian"):
             return 0.0, {"align_lagrange_loss": 0.0}
 
-        # Recompute positive_violation (scalar)
-        align_loss, _ = self._compute_align_loss(batch, rng)
-        align_constraint = self.config.get("align_constraint", 0.1)
-        constraint_violation = align_loss - align_constraint
-        positive_violation = jnp.maximum(constraint_violation, 0.0)
+        batch_size = batch["rewards"].shape[0]
+        rng, policy_rng, sample_rng, q_pi_rng, q_ref_rng = jax.random.split(rng, 5)
 
-        # Penalty for the align Lagrange multiplier
-        # Equivalent form to temperature loss: minimize lambda * positive_violation
-        # For leq constraint, loss is -lambda * (lhs - rhs)
+        # Current policy actions and Q
+        pi_dist = self.forward_policy(batch["observations"], rng=policy_rng, grad_params=params)
+        actions_pi, _ = pi_dist.sample_and_log_prob(seed=sample_rng)
+        qs_pi = self.forward_critic(batch["observations"], actions_pi, rng=q_pi_rng)
+        q_pi = qs_pi.min(axis=0)
+        chex.assert_shape(q_pi, (batch_size,))
+
+        # Reference Q under offline critic on dataset actions
+        ref_actions = jnp.clip(batch["actions"], -0.99, 0.99)
+        offline_params = getattr(self, "offline_critic_params", None)
+        if offline_params is None:
+            offline_params = self.state.target_params
+        qs_ref = self.forward_critic(batch["observations"], ref_actions, rng=q_ref_rng, grad_params=offline_params)
+        q_ref = qs_ref.min(axis=0)
+        chex.assert_shape(q_ref, (batch_size,))
+
+        q_drop = q_ref - q_pi
+        align_loss = jnp.mean(jnp.maximum(q_drop, 0.0))
+
+        # Constraint and penalty
+        align_constraint = jnp.asarray(self.config.get("align_constraint", 0.1), dtype=jnp.float32)
+        constraint_violation = jax.lax.stop_gradient(align_loss - align_constraint)
         align_penalty = self.state.apply_fn(
             {"params": params},
-            lhs=positive_violation,
-            rhs=jnp.zeros_like(positive_violation),
+            lhs=constraint_violation,
+            rhs=jnp.zeros_like(constraint_violation),
             name="align_lagrange",
         )
 
-        # KKT diagnostics
         lambda_value = self.forward_align_lagrange(grad_params=params)
-        complementarity = lambda_value * positive_violation
-
         info = {
             "align_lagrange_loss": align_penalty,
             "align_constraint_lhs": align_loss,
             "align_constraint_rhs": align_constraint,
-            "align_violation": constraint_violation,
-            "align_positive_violation": positive_violation,
             "align_lambda": lambda_value,
-            "align_lambda_times_violation": complementarity,
-            "align_kkt_residual": jnp.abs(complementarity),
+            "align_violation": constraint_violation,
         }
-
         return align_penalty, info
 
+
     def loss_fns(self, batch):
-        """Override to include alignment loss and its multiplier."""
+        """Include align_lagrange loss when using Lagrangian schedule."""
         loss_map = {
             "critic": partial(self.critic_loss_fn, batch),
             "actor": partial(self.policy_loss_fn, batch),
             "temperature": partial(self.temperature_loss_fn, batch),
         }
-        # Only expose align_lagrange loss when module exists (adaptive schedule)
-        if self.config.get("lambda_schedule", "fixed") == "adaptive":
+        schedule = self._normalize_lambda_schedule(self.config.get("lambda_schedule", "fixed"))
+        if schedule in ("lagrangian", "aug_lagrangian"):
             loss_map["align_lagrange"] = partial(self.align_lagrange_loss_fn, batch)
         return loss_map
+
 
     @partial(jax.jit, static_argnames=("pmap_axis", "networks_to_update"))
     def update(
@@ -432,23 +334,16 @@ class ClosedLoopSACAgent(SACAgent):
         batch: Batch,
         *,
         pmap_axis: str = None,
-        networks_to_update: frozenset[str] = frozenset(
-            {"actor", "critic", "temperature", "align_lagrange"}
-        ),
+        networks_to_update: frozenset[str] = frozenset({
+            "actor", "critic", "temperature", "align_lagrange"
+        }),
     ) -> Tuple["ClosedLoopSACAgent", dict]:
-        """
-        Same as base update but includes 'align_lagrange' by default.
-        """
         batch_size = batch["rewards"].shape[0]
         chex.assert_tree_shape_prefix(batch, (batch_size,))
 
         rng, _ = jax.random.split(self.state.rng)
-
-        # Compute gradients and update params
         loss_fns = self.loss_fns(batch)
 
-        # Only compute gradients for specified steps
-        # Filter out steps that are not available (e.g., align_lagrange when module is absent)
         available_steps = frozenset(loss_fns.keys())
         requested_steps = networks_to_update
         filtered_steps = requested_steps & available_steps
@@ -459,22 +354,16 @@ class ClosedLoopSACAgent(SACAgent):
             loss_fns, pmap_axis=pmap_axis, has_aux=True
         )
 
-        # Update target network (if requested)
         if "critic" in networks_to_update:
             new_state = new_state.target_update(self.config["soft_target_update_rate"])
 
-        # Update RNG
         new_state = new_state.replace(rng=rng)
-
-        # Log learning rates
         for name, opt_state in new_state.opt_states.items():
-            if (
-                hasattr(opt_state, "hyperparams")
-                and "learning_rate" in opt_state.hyperparams.keys()
-            ):
+            if hasattr(opt_state, "hyperparams") and "learning_rate" in opt_state.hyperparams.keys():
                 info[f"{name}_lr"] = opt_state.hyperparams["learning_rate"]
 
         return self.replace(state=new_state), info
+
 
     @partial(jax.jit, static_argnames=("utd_ratio", "pmap_axis"))
     def update_high_utd(
@@ -484,13 +373,10 @@ class ClosedLoopSACAgent(SACAgent):
         utd_ratio: int,
         pmap_axis: Optional[str] = None,
     ) -> Tuple["ClosedLoopSACAgent", dict]:
-        """
-        High-UTD version that also updates 'align_lagrange' with the actor/temperature step.
-        """
         batch_size = batch["rewards"].shape[0]
-        assert (
-            batch_size % utd_ratio == 0
-        ), f"Batch size {batch_size} must be divisible by UTD ratio {utd_ratio}"
+        assert batch_size % utd_ratio == 0, (
+            f"Batch size {batch_size} must be divisible by UTD ratio {utd_ratio}"
+        )
         minibatch_size = batch_size // utd_ratio
         chex.assert_tree_shape_prefix(batch, (batch_size,))
 
@@ -508,15 +394,12 @@ class ClosedLoopSACAgent(SACAgent):
             return jnp.reshape(data, (utd_ratio, minibatch_size) + data.shape[1:])
 
         minibatches = jax.tree_util.tree_map(make_minibatch, batch)
-
         (agent,), critic_infos = jax.lax.scan(scan_body, (self,), (minibatches,))
-
         critic_infos = jax.tree_util.tree_map(lambda x: jnp.mean(x, axis=0), critic_infos)
         critic_infos.pop("actor", None)
         critic_infos.pop("temperature", None)
         critic_infos.pop("align_lagrange", None)
 
-        # One step for actor, temperature, and optionally align_lagrange (if present)
         requested = {"actor", "temperature", "align_lagrange"}
         available = set(agent.loss_fns(batch).keys())
         to_update = frozenset(requested & available)
@@ -528,9 +411,7 @@ class ClosedLoopSACAgent(SACAgent):
         actor_temp_infos.pop("critic", None)
 
         infos = {**critic_infos, **actor_temp_infos}
-
         return agent, infos
-
     @classmethod
     def create(
         cls,
@@ -560,8 +441,8 @@ class ClosedLoopSACAgent(SACAgent):
         lambda_sac: float = 1.0,
         lam_eff_linear: bool = False,
         align_steps: int = 100000,
-        # Adaptive align Lagrange options
-        adaptive_align: bool = False,
+        # Lagrangian align options
+        lagrangian_align: bool = False,
         # align_lagrange_init removed; initialized from lam_align
         align_lagrange_optimizer_kwargs: dict = {
             "learning_rate": 3e-4,
@@ -611,8 +492,11 @@ class ClosedLoopSACAgent(SACAgent):
             name="temperature",
         )
 
-        # Only create align_lagrange module if lambda_schedule is adaptive
-        need_align_module = kwargs.get("lambda_schedule", "fixed") == "adaptive"
+        raw_lambda_schedule = kwargs.get("lambda_schedule", "fixed")
+        normalized_lambda_schedule = cls._normalize_lambda_schedule(raw_lambda_schedule)
+
+        # Only create align_lagrange module if lambda_schedule is lagrangian-derived
+        need_align_module = normalized_lambda_schedule in ("lagrangian", "aug_lagrangian")
         if need_align_module:
             align_lagrange_def = LeqLagrangeMultiplier(
                 init_value=lam_align,
@@ -678,18 +562,12 @@ class ClosedLoopSACAgent(SACAgent):
             max_target_backup=kwargs.get("max_target_backup", False),
         )
 
-        # Closed-loop specific configuration
+        # Closed-loop specific configuration (minimal)
         closed_loop_config = {
-            "align_constraint": align_constraint,
             "lam_align": lam_align,
             "align_steps": align_steps,
-            # TD-based trust weighting for policy Q-term (optional)
-            "q_trust_enabled": kwargs.get("q_trust_enabled", False),
-            "q_trust_beta": kwargs.get("q_trust_beta", 1.0),
-            # Policy loss variant: 'align' | 'q_trust'
-            "policy_loss_variant": kwargs.get("policy_loss_variant", "align"),
-            # Current build includes align_lagrange module only if lambda_schedule=='adaptive'
-            "lambda_schedule": kwargs.get("lambda_schedule", "fixed"),
+            # Store normalized schedule for downstream usage
+            "lambda_schedule": normalized_lambda_schedule,
         }
 
         # Prevent external kwargs from overriding computed target_entropy

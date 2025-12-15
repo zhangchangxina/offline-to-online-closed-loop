@@ -127,7 +127,7 @@ def get_config(config_string):
                         # Closed-loop specific parameters
                         align_constraint=0.1,
                         lam_align=1.0,
-                        lambda_schedule="linear", # fixed | linear | adaptive
+                        lambda_schedule="linear", # fixed | linear | lagrangian
                         align_steps=10000,
                     )
                 ).to_dict(),
@@ -253,7 +253,7 @@ def get_config(config_string):
                         # Closed-loop specific parameters
                         align_constraint=0.1,
                         lam_align=1.0,
-                        lambda_schedule="linear", # fixed | linear | adaptive
+                        lambda_schedule="linear", # fixed | linear | lagrangian
                         align_steps=10000,
                     )
                 ).to_dict(),
@@ -375,7 +375,7 @@ def get_config(config_string):
                         # Closed-loop specific parameters
                         align_constraint=0.1,
                         lam_align=1.0,
-                        lambda_schedule="linear", # fixed | linear | adaptive
+                        lambda_schedule="linear", # fixed | linear | lagrangian
                         align_steps=10000,
                     )
                 ).to_dict(),
@@ -479,7 +479,7 @@ def get_config(config_string):
                         # Closed-loop specific parameters
                         align_constraint=0.1,
                         lam_align=1.0,
-                        lambda_schedule="linear", # fixed | linear | adaptive
+                        lambda_schedule="linear", # fixed | linear | lagrangian
                         align_steps=10000,
                     )
                 ).to_dict(),

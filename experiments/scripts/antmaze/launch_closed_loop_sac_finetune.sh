@@ -21,11 +21,11 @@ python3 finetune.py \
 --warmup_steps 5000 \
 --config.agent_kwargs.policy_loss_variant=q_trust \
 --config.agent_kwargs.q_trust_beta=2.0 \
---config.agent_kwargs.lambda_schedule=adaptive \
+--config.agent_kwargs.lambda_schedule=lagrangian \
 --config.agent_kwargs.lam_align=1 \
 --config.agent_kwargs.align_steps=100000 \
 --config.agent_kwargs.align_constraint=0.1 \
 --config.agent_kwargs.align_lagrange_optimizer_kwargs.learning_rate=1e-3 \
 $@
 
-# --config.agent_kwargs.lambda_schedule=fixed/linear/adaptive
+# --config.agent_kwargs.lambda_schedule=fixed/linear/lagrangian

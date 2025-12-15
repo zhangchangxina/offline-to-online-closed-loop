@@ -134,6 +134,7 @@ def _determine_whether_sparse_reward(env_name):
         "halfcheetah" in env_name
         or "hopper" in env_name
         or "walker" in env_name
+        or "ant-" in env_name
         or "kitchen" in env_name
     ):
         is_sparse_reward = False
@@ -146,7 +147,9 @@ def _determine_whether_sparse_reward(env_name):
         # Adroit dense-reward variants (human/cloned/expert)
         is_sparse_reward = False
     else:
-        raise NotImplementedError
+        raise NotImplementedError(
+            f"Unknown environment for sparse-reward determination: {env_name}"
+        )
 
     return is_sparse_reward
 

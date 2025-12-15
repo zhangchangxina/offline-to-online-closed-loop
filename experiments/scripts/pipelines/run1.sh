@@ -53,7 +53,7 @@ python3 finetune.py \
  --warmup_steps 5000 \
   --config.agent_kwargs.bc_steps=500000 \
   --config.agent_kwargs.bc_lambda_init=1 \
-  --config.agent_kwargs.bc_lambda_schedule=adaptive \
+  --config.agent_kwargs.bc_lambda_schedule=lagrangian \
   --config.agent_kwargs.bc_constraint_mode=j_drop \
   --config.agent_kwargs.bc_lagrangian_lr=1e-4 \
   --config.agent_kwargs.bc_drop_metric=relative \
@@ -88,7 +88,7 @@ python3 finetune.py \
  --warmup_steps 5000 \
   --config.agent_kwargs.bc_steps=500000 \
   --config.agent_kwargs.bc_lambda_init=1 \
-  --config.agent_kwargs.bc_lambda_schedule=adaptive \
+  --config.agent_kwargs.bc_lambda_schedule=lagrangian \
   --config.agent_kwargs.bc_constraint_mode=j_drop \
   --config.agent_kwargs.bc_lagrangian_lr=1e-4 \
   --config.agent_kwargs.bc_drop_metric=relative \

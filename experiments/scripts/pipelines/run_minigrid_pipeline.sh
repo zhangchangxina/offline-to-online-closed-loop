@@ -22,8 +22,9 @@ PROJECT_DIR="wsrl"
 R_SCALE=1.0
 R_BIAS=0.0
 
-num_offline_steps=100000
-save_interval=50000
+num_offline_steps=300000
+num_online_steps=300000
+save_interval=100000
 
 echo "[GPU ${GPU_ID}] CALQL (REDQ10, UTD=4) pretrain+online for ${ENV_ID}"
 python3 finetune.py \
@@ -79,7 +80,7 @@ python3 finetune.py \
   --warmup_steps 5000 \
   --config.agent_kwargs.bc_steps=300000 \
   --config.agent_kwargs.bc_lambda_init=1 \
-  --config.agent_kwargs.bc_lambda_schedule=adaptive \
+  --config.agent_kwargs.bc_lambda_schedule=lagrangian \
   --config.agent_kwargs.bc_constraint_mode=q_drop \
   --config.agent_kwargs.bc_lagrangian_lr=1e-4 \
   --config.agent_kwargs.bc_drop_metric=relative \

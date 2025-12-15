@@ -11,17 +11,20 @@ def get_config(updates=None):
     config.critic_subsample_size = 2
 
     # Closed-loop update mechanism parameters
-    config.closed_loop_enabled = False  # disable during offline to match wsrl
     config.align_constraint = 0.1  # Constraint for E[q_delta^2] <= c
     config.lam_align = 1.0  # Weight for alignment loss
-    # Lambda weighting schedule: "fixed" | "linear" | "adaptive"
+    config.lambda_clip = 10.0  # Max clip for learned lambda (align_lagrange)
+    # Lambda weighting schedule: "fixed" | "linear" | "lagrangian"
     # - fixed: lam_align = lam_align_init
     # - linear: lam_align = lam_align_init × (1 - progress)
-    # - adaptive: lam_align = align_lagrange (learned by positive_violation)
+    # - lagrangian: lam_align = align_lagrange (learned by positive_violation)
     config.lambda_schedule = "fixed"
     config.align_steps = 10000  # used when lambda_schedule == "linear"
     config.lam_eff_linear_start_step = 0  # allow offsetting the schedule start (e.g., after resume)
-    # For adaptive, align_lagrange init defaults to lam_align unless overridden in agent.create
+    # For lagrangian schedules, align_lagrange init defaults to lam_align unless overridden in agent.create
+
+    # Optional external offline critic checkpoint for q-drop reference
+    config.align_offline_ckpt = ""
 
     # Diagnostics/logging defaults to allow CLI overrides
     config.log_actor_grad_terms = False

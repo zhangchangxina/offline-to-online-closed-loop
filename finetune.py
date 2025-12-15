@@ -282,6 +282,48 @@ def main(_):
                 )
             )
 
+    # Set up offline reference critic for Closed-Loop SAC (used for q-drop align)
+    if FLAGS.agent == "closed_loop_sac":
+        def _cfg_get(cfg, key, default=None):
+            if cfg is None:
+                return default
+            if hasattr(cfg, "get"):
+                return cfg.get(key, default)
+            if isinstance(cfg, dict):
+                return cfg.get(key, default)
+            return default
+
+        agent_cfg = getattr(FLAGS.config, "agent_kwargs", {})
+        logging.info(
+            "Closed-loop SAC config resolved: lambda_schedule=%s, align_steps=%s, lambda_clip=%s",
+            _cfg_get(agent_cfg, "lambda_schedule", "fixed"),
+            _cfg_get(agent_cfg, "align_steps", None),
+            _cfg_get(agent_cfg, "lambda_clip", None),
+        )
+        # Optional: load a separate offline critic checkpoint (override below default)
+        align_ckpt_path = FLAGS.config.agent_kwargs.get("align_offline_ckpt", "")
+        if isinstance(align_ckpt_path, str) and len(align_ckpt_path) > 0:
+            try:
+                ckpt_obj = checkpoints.restore_checkpoint(align_ckpt_path, target=None)
+                ckpt_state = getattr(ckpt_obj, "state", ckpt_obj)
+                critic_params = getattr(ckpt_state, "target_params", None) or getattr(ckpt_state, "params", None)
+                if critic_params is not None:
+                    from wsrl.agents.closed_loop_sac import ClosedLoopSACAgent  # local import to avoid cycles
+                    assert isinstance(agent, ClosedLoopSACAgent) or hasattr(agent, "set_offline_critic_params")
+                    agent = agent.set_offline_critic_params(critic_params)
+                    logging.info("Loaded offline critic teacher from %s", align_ckpt_path)
+                else:
+                    logging.warning("Checkpoint at %s did not contain params/target_params; skipping offline critic teacher.", align_ckpt_path)
+            except Exception as e:
+                logging.warning("Failed to load offline critic teacher from %s: %s", align_ckpt_path, repr(e))
+        else:
+            # Default: freeze current (possibly resumed) target_params as offline reference critic
+            try:
+                agent = agent.set_offline_critic_params(agent.state.target_params)
+                logging.info("Initialized offline critic teacher from current target_params.")
+            except Exception:
+                pass
+
     """
     eval function
     """
@@ -374,8 +416,6 @@ def main(_):
 
             # enable closed-loop extras only for online stage
             if FLAGS.agent == "closed_loop_sac":
-                # Enable closed-loop extras only for online stage
-                agent.update_config({"closed_loop_enabled": True})
                 # If using linear schedule, start decay at the online switch step
                 if agent.config.get("lambda_schedule", "fixed") == "linear":
                     agent.update_config({
@@ -435,7 +475,7 @@ def main(_):
                         else:
                             offline_success = float(np.mean([eval_env.get_normalized_score(np.sum(t["rewards"])) for t in trajs]))
                         wandb_logger.log({"baseline": {"offline_success": offline_success}}, step=step)
-                        # Provide baseline to agent for internal J_drop if using adaptive schedule with j_drop
+                        # Provide baseline to agent for internal J_drop when a Lagrangian schedule is active with j_drop
                         agent.update_config({
                             "perf_baseline": baseline_return_offline,
                         })
@@ -523,7 +563,7 @@ def main(_):
                     else:
                         ewma_online_return = (1 - ewma_alpha) * ewma_online_return + ewma_alpha * float(episode_return)
                     online_log["ewma_return"] = float(ewma_online_return)
-                    # If SAC-BC, only pass performance to agent when using adaptive+j_drop. Do not compute j_drop externally.
+                    # If SAC-BC, only pass performance to agent when using a Lagrangian schedule with j_drop. Do not compute j_drop externally.
                     if FLAGS.agent == "sac_bc":
                         perf_source = str(FLAGS.config.agent_kwargs.get("bc_perf_source", "success"))
                         if perf_source == "success":
@@ -534,9 +574,10 @@ def main(_):
                         else:  # "return": use current episode return (no window)
                             perf_online = float(episode_return)
                         online_log["perf_online_debug"] = perf_online
+                        bc_schedule = FLAGS.config.agent_kwargs.get("bc_lambda_schedule", "fixed")
                         if (
                             FLAGS.config.agent_kwargs.get("bc_constraint_mode", "bc_loss") == "j_drop"
-                            and FLAGS.config.agent_kwargs.get("bc_lambda_schedule", "fixed") == "adaptive"
+                            and bc_schedule in ("lagrangian", "aug_lagrangian")
                             and perf_online is not None
                         ):
                             # Provide performance value to agent and emit pulse for j_drop update
@@ -633,9 +674,10 @@ def main(_):
                         )
 
                     # After updates, ensure any J-drop pulse is cleared (for one-shot behavior if enabled)
+                    bc_schedule = FLAGS.config.agent_kwargs.get("bc_lambda_schedule", "fixed")
                     if FLAGS.agent == "sac_bc" and \
                        FLAGS.config.agent_kwargs.get("bc_constraint_mode", "bc_loss") == "j_drop" and \
-                       FLAGS.config.agent_kwargs.get("bc_lambda_schedule", "fixed") == "adaptive":
+                       bc_schedule in ("lagrangian", "aug_lagrangian"):
                         try:
                             agent.update_config({"bc_has_new_jdrop": False})
                         except Exception:

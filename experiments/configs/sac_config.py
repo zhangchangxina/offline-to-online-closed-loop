@@ -64,17 +64,18 @@ def get_config(updates=None):
     # Unified target: "dataset" | "actor_target" | path to offline checkpoint
     config.bc_target = "dataset"
     # Lagrange/schedule options for BC weighting
-    config.bc_lambda_schedule = "fixed"  # "fixed" | "adaptive" | "linear" | "exp" | "exp_decay" | "fast_slow"
+    config.bc_lambda_schedule = "fixed"  # "fixed" | "lagrangian" | "aug_lagrangian" | "linear" | "exp" | "exp_decay" | "fast_slow"
     config.bc_lambda_exp_rate = 5.0  # decay rate for exponential schedule
-    # Constraint mode for adaptive BC Lagrange (supported in SAC-BC agent)
+    # Constraint mode for BC Lagrange (supported in SAC-BC agent)
     # one of: "bc_loss" | "q_drop" | "j_drop"
     config.bc_constraint_mode = "bc_loss"
+    config.bc_aug_penalty = 1.0  # coefficient for augmented BC penalty (Aug-Lagrangian)
     config.bc_constraint = 0.1
     # Reference for q_drop constraint: "dataset" | "actor_target" | "offline_checkpoint"
     config.bc_qdrop_reference = "dataset"
-    # Adaptive q_drop constraint options within a batch
+    # Dynamic q_drop constraint options within a batch
     # one of: "none" | "batch_quantile" | "batch_normalized"
-    config.bc_qdrop_adaptive_mode = "none"
+    config.bc_qdrop_dynamic_mode = "none"
     config.bc_qdrop_quantile = 0.9
     config.bc_qdrop_ema_alpha = 0.0  # placeholder (not used without host-side update)
     config.bc_qdrop_norm_c = 0.5
