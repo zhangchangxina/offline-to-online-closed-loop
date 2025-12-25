@@ -41,16 +41,19 @@ def get_config(updates=None):
     config.actor_optimizer_kwargs = ConfigDict(
         {
             "learning_rate": 1e-4,
+            "clip_grad_norm": 1.0,
         }
     )
     config.critic_optimizer_kwargs = ConfigDict(
         {
             "learning_rate": 3e-4,
+            "clip_grad_norm": 1.0,
         }
     )
     config.temperature_optimizer_kwargs = ConfigDict(
         {
             "learning_rate": 1e-4,
+            "clip_grad_norm": 1.0,
         }
     )
 

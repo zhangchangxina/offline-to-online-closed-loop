@@ -36,11 +36,13 @@ def get_config(updates=None):
     config.actor_optimizer_kwargs=ConfigDict(
         {
             "learning_rate": 3e-4,
+            "clip_grad_norm": 1.0,
         }
     )
     config.value_critic_optimizer_kwargs=ConfigDict(
         {
             "learning_rate": 3e-4,
+            "clip_grad_norm": 1.0,
         }
     )
 

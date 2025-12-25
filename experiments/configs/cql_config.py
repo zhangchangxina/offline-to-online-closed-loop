@@ -7,6 +7,11 @@ from experiments.configs import sac_config
 def get_config(updates=None):
     config = sac_config.get_config()
 
+    # Add gradient clipping to prevent NaN explosions
+    config.actor_optimizer_kwargs.clip_grad_norm = 1.0
+    config.critic_optimizer_kwargs.clip_grad_norm = 1.0
+    config.temperature_optimizer_kwargs.clip_grad_norm = 1.0
+
     config.cql_n_actions = 10
     config.cql_action_sample_method = "uniform"
     config.cql_max_target_backup = True
