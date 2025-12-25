@@ -91,6 +91,7 @@ def get_env_type(env_name):
         "pen-binary-v0",
         "door-binary-v0",
         "relocate-binary-v0",
+        "hammer-binary-v0",
     ):
         env_type = "adroit-binary"
     elif "antmaze" in env_name:
@@ -125,6 +126,7 @@ def _determine_whether_sparse_reward(env_name):
         "pen-binary-v0",
         "door-binary-v0",
         "relocate-binary-v0",
+        "hammer-binary-v0",
         "pen-binary",
         "door-binary",
         "relocate-binary",
@@ -189,6 +191,7 @@ def _get_negative_reward(env_name, reward_scale, reward_bias):
         "pen-binary-v0",
         "door-binary-v0",
         "relocate-binary-v0",
+        "hammer-binary-v0",
     ]:
         reward_neg = (
             ENV_REWARD_INFO["adroit-binary"]["reward_neg"] * reward_scale + reward_bias

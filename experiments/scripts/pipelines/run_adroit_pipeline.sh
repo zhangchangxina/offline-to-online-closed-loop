@@ -129,7 +129,7 @@ python3 finetune.py \
   --config.agent_kwargs.bc_perf_source=success \
   --config.agent_kwargs.bc_constraint=0.1 \
   --config.agent_kwargs.bc_target=dataset \
-  --config.agent_kwargs.bc_weight_mode=none \
+  --config.agent_kwargs.bc_weight_mode=uncert_inverse \
   --config.agent_kwargs.bc_uncert_action_source=dataset \
   --config.agent_kwargs.bc_uncert_q_source=current \
   --config.agent_kwargs.bc_weight_uncert_measure=std \
@@ -140,7 +140,7 @@ python3 finetune.py \
   --save_dir ${SAVE_ROOT} | cat
 
 
-echo "[GPU ${GPU_ID}] WSRL (SAC-BC) from CALQL-20K for ${ENV_ID}"
+  echo "[GPU ${GPU_ID}] WSRL (SAC-BC) from CALQL-20K for ${ENV_ID}"
 python3 finetune.py \
   --agent sac_bc \
   --config experiments/configs/train_config.py:adroit_wsrl \
@@ -152,10 +152,10 @@ python3 finetune.py \
   --resume_path ${CKPT_PATH} \
   --num_offline_steps ${num_offline_steps} \
   --num_online_steps ${num_online_steps} \
+  --save_interval ${save_interval} \
   --utd 4 \
   --batch_size 1024 \
-  --warmup_steps 5000 \
-  --warmup_update_critic True \
+  --warmup_steps 5 \
   --config.agent_kwargs.bc_steps=300000 \
   --config.agent_kwargs.bc_lambda_init=1 \
   --config.agent_kwargs.bc_lambda_schedule=lagrangian \
@@ -165,7 +165,7 @@ python3 finetune.py \
   --config.agent_kwargs.bc_perf_source=success \
   --config.agent_kwargs.bc_constraint=0.1 \
   --config.agent_kwargs.bc_target=dataset \
-  --config.agent_kwargs.bc_weight_mode=td_inverse \
+  --config.agent_kwargs.bc_weight_mode=uncert_inverse \
   --config.agent_kwargs.bc_uncert_action_source=dataset \
   --config.agent_kwargs.bc_uncert_q_source=current \
   --config.agent_kwargs.bc_weight_uncert_measure=std \
@@ -174,13 +174,6 @@ python3 finetune.py \
   --config.agent_kwargs.bc_teacher_deterministic=True \
   --exp_name wsrl_sacbc \
   --save_dir ${SAVE_ROOT} | cat
-
-
-
-
-
-
-
 
 
 echo "[GPU ${GPU_ID}] Pipeline for ${ENV_ID} completed."
