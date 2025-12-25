@@ -40,6 +40,7 @@ python3 finetune.py \
   --save_dir ${SAVE_ROOT} \
   2>&1 | tee -a ${SAVE_ROOT}/cql_${ENV_ID}_seed${SEED}.log
 
+: && sync && sleep 0.1
 # Get CQL checkpoint path
 EXP_DESC_CQL="cql_${ENV_ID}_cql_seed${SEED}"
 RUN_DIR_CQL=$(ls -1dt ${SAVE_ROOT}/${PROJECT_DIR}/${EXP_DESC_CQL}_* | head -n 1)
@@ -64,7 +65,7 @@ python3 finetune.py \
   --online_sampling_method append \
   2>&1 | tee -a ${SAVE_ROOT}/cql_${ENV_ID}_seed${SEED}.log
 
-
+: && sync && sleep 0.1
 # IQL: run non-append version first
 echo "[GPU ${GPU_ID}] IQL pretrain for ${ENV_ID}"
 python3 finetune.py \
@@ -81,6 +82,7 @@ python3 finetune.py \
   --save_dir ${SAVE_ROOT} \
   2>&1 | tee -a ${SAVE_ROOT}/iql_${ENV_ID}_seed${SEED}.log
 
+: && sync && sleep 0.1
 # Get IQL checkpoint path
 EXP_DESC_IQL="iql_${ENV_ID}_iql_seed${SEED}"
 RUN_DIR_IQL=$(ls -1dt ${SAVE_ROOT}/${PROJECT_DIR}/${EXP_DESC_IQL}_* | head -n 1)
@@ -105,7 +107,7 @@ python3 finetune.py \
   --online_sampling_method append \
   2>&1 | tee -a ${SAVE_ROOT}/iql_${ENV_ID}_seed${SEED}.log
 
-
+: && sync && sleep 0.1
 echo "[GPU ${GPU_ID}] RLPD (SAC with offline data ratio=0.5) for ${ENV_ID}"
 python3 finetune.py \
   --agent sac \
@@ -123,6 +125,7 @@ python3 finetune.py \
   --exp_name rlpd \
   --save_dir ${SAVE_ROOT}
 
+: && sync && sleep 0.1
 echo "[GPU ${GPU_ID}] FASTSAC (SAC with high utd) for ${ENV_ID}"
 python3 finetune.py \
   --agent sac \
@@ -140,7 +143,7 @@ python3 finetune.py \
   --exp_name fastsac \
   --save_dir ${SAVE_ROOT}
 
-
+: && sync && sleep 0.1
 echo "[GPU ${GPU_ID}] CALQL (REDQ10, UTD=4) pretrain for ${ENV_ID}"
 python3 finetune.py \
   --agent calql \
@@ -158,6 +161,7 @@ python3 finetune.py \
   --save_dir ${SAVE_ROOT} \
   2>&1 | tee -a ${SAVE_ROOT}/calql_${ENV_ID}_seed${SEED}.log
 
+: && sync && sleep 0.1
 EXP_DESC="calql_ensemble_highutd_${ENV_ID}_calql_seed${SEED}"
 RUN_DIR=$(ls -1dt ${SAVE_ROOT}/${PROJECT_DIR}/${EXP_DESC}_* | head -n 1)
 CKPT_PATH="${RUN_DIR}/checkpoint_${num_offline_steps}"
@@ -183,6 +187,7 @@ python3 finetune.py \
   --exp_name awac \
   --save_dir ${SAVE_ROOT}
 
+: && sync && sleep 0.1
 # AWAC append: load from CALQL checkpoint
 echo "[GPU ${GPU_ID}] AWAC append from CALQL for ${ENV_ID}"
 python3 finetune.py \
@@ -203,6 +208,7 @@ python3 finetune.py \
   --exp_name awac_append \
   --save_dir ${SAVE_ROOT}
 
+: && sync && sleep 0.1
 echo "[GPU ${GPU_ID}] CALQL-APPEND (REDQ10, UTD=4) pretrain for ${ENV_ID}"
 python3 finetune.py \
   --agent calql \
@@ -222,6 +228,7 @@ python3 finetune.py \
   --save_dir ${SAVE_ROOT} \
   2>&1 | tee -a ${SAVE_ROOT}/calql_${ENV_ID}_seed${SEED}.log
 
+: && sync && sleep 0.1
 echo "[GPU ${GPU_ID}] WSRL (SAC) from CALQL-20K for ${ENV_ID}"
 python3 finetune.py \
   --agent sac \
@@ -241,6 +248,7 @@ python3 finetune.py \
   --exp_name wsrl \
   --save_dir ${SAVE_ROOT}
 
+: && sync && sleep 0.1
 echo "[GPU ${GPU_ID}] WSRL (SAC-BC) from CALQL-20K for ${ENV_ID}"
 python3 finetune.py \
   --agent sac_bc \
@@ -276,7 +284,7 @@ python3 finetune.py \
   --exp_name wsrl_sacbc \
   --save_dir ${SAVE_ROOT}
 
-
+: && sync && sleep 0.1
 echo "[GPU ${GPU_ID}] WSRL (SAC-BC, td_inverse) from CALQL-20K for ${ENV_ID}"
 python3 finetune.py \
   --agent sac_bc \
@@ -312,7 +320,7 @@ python3 finetune.py \
   --exp_name wsrl_sacbc \
   --save_dir ${SAVE_ROOT}
 
-
+: && sync && sleep 0.1
 echo "[GPU ${GPU_ID}] WSRL (SAC-BC, none) from CALQL-20K for ${ENV_ID}"
 python3 finetune.py \
   --agent sac_bc \
@@ -348,6 +356,5 @@ python3 finetune.py \
   --exp_name wsrl_sacbc \
   --save_dir ${SAVE_ROOT}
 
-
+: && sync && sleep 0.1
 echo "[GPU ${GPU_ID}] Pipeline for ${ENV_ID} completed."
-
