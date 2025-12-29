@@ -21,7 +21,7 @@ R_BIAS=5.0
 
 num_offline_steps=300000
 num_online_steps=300000
-save_interval=300000
+save_interval=10000000
 
 # CQL: run non-append version first
 echo "[GPU ${GPU_ID}] CQL pretrain for ${ENV_ID}"
@@ -132,9 +132,9 @@ python3 finetune.py \
   --reward_scale ${R_SCALE} \
   --reward_bias ${R_BIAS} \
   --num_online_steps ${num_online_steps} \
-  --save_interval ${save_interval} \
   --utd 4 \
   --batch_size 1024 \
+  --save_interval ${save_interval} \
   --exp_name rlpd \
   --save_dir ${SAVE_ROOT}
 
@@ -149,9 +149,9 @@ python3 finetune.py \
   --reward_scale ${R_SCALE} \
   --reward_bias ${R_BIAS} \
   --num_online_steps ${num_online_steps} \
-  --save_interval ${save_interval} \
   --utd 4 \
   --batch_size 1024 \
+  --save_interval ${save_interval} \
   --exp_name fastsac \
   --save_dir ${SAVE_ROOT}
 
@@ -167,9 +167,9 @@ python3 finetune.py \
   --reward_bias ${R_BIAS} \
   --num_offline_steps ${num_offline_steps} \
   --num_online_steps ${num_online_steps} \
-  --save_interval ${save_interval} \
   --utd 4 \
   --batch_size 1024 \
+  --save_interval ${save_interval} \
   --exp_name awac \
   --save_dir ${SAVE_ROOT}
 
@@ -202,9 +202,9 @@ python3 finetune.py \
   --reward_bias ${R_BIAS} \
   --num_offline_steps ${num_offline_steps} \
   --num_online_steps ${num_online_steps} \
-  --save_interval ${save_interval} \
   --utd 4 \
   --batch_size 1024 \
+  --save_interval ${save_interval} \
   --online_sampling_method append \
   --exp_name awac_append \
   --save_dir ${SAVE_ROOT}
@@ -263,10 +263,10 @@ python3 finetune.py \
   --resume_path ${CKPT_PATH_IQL} \
   --num_offline_steps ${num_offline_steps} \
   --num_online_steps ${num_online_steps} \
-  --save_interval ${save_interval} \
   --utd 4 \
   --batch_size 1024 \
   --warmup_steps 5000 \
+  --save_interval ${save_interval} \
   --exp_name wsrl \
   --save_dir ${SAVE_ROOT}
 
@@ -282,10 +282,10 @@ python3 finetune.py \
   --resume_path ${CKPT_PATH_IQL} \
   --num_offline_steps ${num_offline_steps} \
   --num_online_steps ${num_online_steps} \
-  --save_interval ${save_interval} \
   --utd 4 \
   --batch_size 1024 \
   --warmup_steps 5000 \
+  --save_interval ${save_interval} \
   --config.agent_kwargs.bc_steps=${num_online_steps} \
   --config.agent_kwargs.bc_lambda_init=1 \
   --config.agent_kwargs.bc_lambda_schedule=lagrangian \
@@ -317,10 +317,10 @@ python3 finetune.py \
   --resume_path ${CKPT_PATH_IQL} \
   --num_offline_steps ${num_offline_steps} \
   --num_online_steps ${num_online_steps} \
-  --save_interval ${save_interval} \
   --utd 4 \
   --batch_size 1024 \
   --warmup_steps 5000 \
+  --save_interval ${save_interval} \
   --config.agent_kwargs.bc_steps=${num_online_steps} \
   --config.agent_kwargs.bc_lambda_init=1 \
   --config.agent_kwargs.bc_lambda_schedule=lagrangian \
@@ -352,10 +352,10 @@ python3 finetune.py \
   --resume_path ${CKPT_PATH_IQL} \
   --num_offline_steps ${num_offline_steps} \
   --num_online_steps ${num_online_steps} \
-  --save_interval ${save_interval} \
   --utd 4 \
   --batch_size 1024 \
   --warmup_steps 5000 \
+  --save_interval ${save_interval} \
   --config.agent_kwargs.bc_steps=${num_online_steps} \
   --config.agent_kwargs.bc_lambda_init=1 \
   --config.agent_kwargs.bc_lambda_schedule=lagrangian \

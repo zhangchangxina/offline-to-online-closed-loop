@@ -22,7 +22,7 @@ R_BIAS=-5.0
 
 num_offline_steps=1000000
 num_online_steps=300000
-save_interval=300000
+save_interval=100000000
 
 # CQL: run non-append version first
 echo "[GPU ${GPU_ID}] CQL pretrain for ${ENV_ID}"

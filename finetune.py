@@ -717,10 +717,11 @@ def main(_):
         """
         Save Checkpoint
         """
-        if step % FLAGS.save_interval == 0 or step == FLAGS.num_offline_steps:
+        # Save checkpoint at end of offline training, end of online training, or at save_interval
+        if step % FLAGS.save_interval == 0 or step == FLAGS.num_offline_steps or step == FLAGS.num_offline_steps + FLAGS.num_online_steps:
             logging.info("Saving checkpoint...")
             checkpoint_path = checkpoints.save_checkpoint(
-                save_dir, agent, step=step, keep=30
+                save_dir, agent, step=step, keep=2
             )
             logging.info("Saved checkpoint to %s", checkpoint_path)
 

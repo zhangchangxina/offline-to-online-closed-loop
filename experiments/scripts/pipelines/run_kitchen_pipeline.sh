@@ -20,7 +20,7 @@ R_BIAS=-4.0
 
 num_offline_steps=300000
 num_online_steps=300000
-save_interval=300000
+save_interval=100000000
 
 # Ensure MuJoCo 2.1.0 binaries are on the path for D4RL kitchen mujoco_py
 # export LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}:/root/.mujoco/mujoco210/bin
