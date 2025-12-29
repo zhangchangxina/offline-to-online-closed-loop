@@ -25,138 +25,168 @@ save_interval=300000
 # Ensure MuJoCo 2.1.0 binaries are on the path for D4RL kitchen mujoco_py
 # export LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}:/root/.mujoco/mujoco210/bin
 
-# CQL: run non-append version first
-echo "[GPU ${GPU_ID}] CQL pretrain for ${ENV_ID}"
-python3 finetune.py \
-  --agent cql \
-  --config experiments/configs/train_config.py:kitchen_cql \
-  --env ${ENV_ID} \
-  --seed ${SEED} \
-  --reward_scale ${R_SCALE} \
-  --reward_bias ${R_BIAS} \
-  --num_offline_steps ${num_offline_steps} \
-  --num_online_steps ${num_online_steps} \
-  --save_interval ${save_interval} \
-  --exp_name cql \
-  --save_dir ${SAVE_ROOT}
+# # CQL: run non-append version first
+# echo "[GPU ${GPU_ID}] CQL pretrain for ${ENV_ID}"
+# python3 finetune.py \
+#   --agent cql \
+#   --config experiments/configs/train_config.py:kitchen_cql \
+#   --env ${ENV_ID} \
+#   --seed ${SEED} \
+#   --reward_scale ${R_SCALE} \
+#   --reward_bias ${R_BIAS} \
+#   --num_offline_steps ${num_offline_steps} \
+#   --num_online_steps ${num_online_steps} \
+#   --save_interval ${save_interval} \
+#   --exp_name cql \
+#   --save_dir ${SAVE_ROOT}
 
-# Get CQL checkpoint path
-EXP_DESC_CQL="cql_${ENV_ID}_cql_seed${SEED}"
-RUN_DIR_CQL=$(ls -1dt ${SAVE_ROOT}/${PROJECT_DIR}/${EXP_DESC_CQL}_* | head -n 1)
-CKPT_PATH_CQL="${RUN_DIR_CQL}/checkpoint_${num_offline_steps}"
-echo "[GPU ${GPU_ID}] Using CQL checkpoint: ${CKPT_PATH_CQL}"
+# # Get CQL checkpoint path (find directory that has the required checkpoint)
+# EXP_DESC_CQL="cql_${ENV_ID}_cql_seed${SEED}"
+# RUN_DIR_CQL=""
+# for dir in $(ls -1dt ${SAVE_ROOT}/${PROJECT_DIR}/${EXP_DESC_CQL}_* 2>/dev/null); do
+#   if [[ -d "${dir}/checkpoint_${num_offline_steps}" ]]; then
+#     RUN_DIR_CQL="$dir"
+#     break
+#   fi
+# done
+# if [[ -z "$RUN_DIR_CQL" ]]; then
+#   echo "[ERROR] No CQL checkpoint found with ${num_offline_steps} steps for ${ENV_ID}"
+#   exit 1
+# fi
+# CKPT_PATH_CQL="${RUN_DIR_CQL}/checkpoint_${num_offline_steps}"
+# echo "[GPU ${GPU_ID}] Using CQL checkpoint: ${CKPT_PATH_CQL}"
 
-# CQL append: load CQL offline checkpoint
-echo "[GPU ${GPU_ID}] CQL append for ${ENV_ID}"
-python3 finetune.py \
-  --agent cql \
-  --config experiments/configs/train_config.py:kitchen_cql \
-  --env ${ENV_ID} \
-  --seed ${SEED} \
-  --resume_path ${CKPT_PATH_CQL} \
-  --reward_scale ${R_SCALE} \
-  --reward_bias ${R_BIAS} \
-  --num_offline_steps ${num_offline_steps} \
-  --num_online_steps ${num_online_steps} \
-  --save_interval ${save_interval} \
-  --exp_name cql_append \
-  --save_dir ${SAVE_ROOT} \
-  --online_sampling_method append
+# # CQL append: load CQL offline checkpoint
+# echo "[GPU ${GPU_ID}] CQL append for ${ENV_ID}"
+# python3 finetune.py \
+#   --agent cql \
+#   --config experiments/configs/train_config.py:kitchen_cql \
+#   --env ${ENV_ID} \
+#   --seed ${SEED} \
+#   --resume_path ${CKPT_PATH_CQL} \
+#   --reward_scale ${R_SCALE} \
+#   --reward_bias ${R_BIAS} \
+#   --num_offline_steps ${num_offline_steps} \
+#   --num_online_steps ${num_online_steps} \
+#   --save_interval ${save_interval} \
+#   --exp_name cql_append \
+#   --save_dir ${SAVE_ROOT} \
+#   --online_sampling_method append
 
-# IQL: run non-append version first
-echo "[GPU ${GPU_ID}] IQL pretrain for ${ENV_ID}"
-python3 finetune.py \
-  --agent iql \
-  --config experiments/configs/train_config.py:kitchen_iql \
-  --env ${ENV_ID} \
-  --seed ${SEED} \
-  --reward_scale ${R_SCALE} \
-  --reward_bias ${R_BIAS} \
-  --num_offline_steps ${num_offline_steps} \
-  --num_online_steps ${num_online_steps} \
-  --save_interval ${save_interval} \
-  --exp_name iql \
-  --save_dir ${SAVE_ROOT}
+# # IQL: run non-append version first
+# echo "[GPU ${GPU_ID}] IQL pretrain for ${ENV_ID}"
+# python3 finetune.py \
+#   --agent iql \
+#   --config experiments/configs/train_config.py:kitchen_iql \
+#   --env ${ENV_ID} \
+#   --seed ${SEED} \
+#   --reward_scale ${R_SCALE} \
+#   --reward_bias ${R_BIAS} \
+#   --num_offline_steps ${num_offline_steps} \
+#   --num_online_steps ${num_online_steps} \
+#   --save_interval ${save_interval} \
+#   --exp_name iql \
+#   --save_dir ${SAVE_ROOT}
 
-# Get IQL checkpoint path
-EXP_DESC_IQL="iql_${ENV_ID}_iql_seed${SEED}"
-RUN_DIR_IQL=$(ls -1dt ${SAVE_ROOT}/${PROJECT_DIR}/${EXP_DESC_IQL}_* | head -n 1)
-CKPT_PATH_IQL="${RUN_DIR_IQL}/checkpoint_${num_offline_steps}"
-echo "[GPU ${GPU_ID}] Using IQL checkpoint: ${CKPT_PATH_IQL}"
+# # Get IQL checkpoint path (find directory that has the required checkpoint)
+# EXP_DESC_IQL="iql_${ENV_ID}_iql_seed${SEED}"
+# RUN_DIR_IQL=""
+# for dir in $(ls -1dt ${SAVE_ROOT}/${PROJECT_DIR}/${EXP_DESC_IQL}_* 2>/dev/null); do
+#   if [[ -d "${dir}/checkpoint_${num_offline_steps}" ]]; then
+#     RUN_DIR_IQL="$dir"
+#     break
+#   fi
+# done
+# if [[ -z "$RUN_DIR_IQL" ]]; then
+#   echo "[ERROR] No IQL checkpoint found with ${num_offline_steps} steps for ${ENV_ID}"
+#   exit 1
+# fi
+# CKPT_PATH_IQL="${RUN_DIR_IQL}/checkpoint_${num_offline_steps}"
+# echo "[GPU ${GPU_ID}] Using IQL checkpoint: ${CKPT_PATH_IQL}"
 
-# IQL append: load IQL offline checkpoint
-echo "[GPU ${GPU_ID}] IQL append for ${ENV_ID}"
-python3 finetune.py \
-  --agent iql \
-  --config experiments/configs/train_config.py:kitchen_iql \
-  --env ${ENV_ID} \
-  --seed ${SEED} \
-  --resume_path ${CKPT_PATH_IQL} \
-  --reward_scale ${R_SCALE} \
-  --reward_bias ${R_BIAS} \
-  --num_offline_steps ${num_offline_steps} \
-  --num_online_steps ${num_online_steps} \
-  --save_interval ${save_interval} \
-  --exp_name iql_append \
-  --save_dir ${SAVE_ROOT} \
-  --online_sampling_method append
+# # IQL append: load IQL offline checkpoint
+# echo "[GPU ${GPU_ID}] IQL append for ${ENV_ID}"
+# python3 finetune.py \
+#   --agent iql \
+#   --config experiments/configs/train_config.py:kitchen_iql \
+#   --env ${ENV_ID} \
+#   --seed ${SEED} \
+#   --resume_path ${CKPT_PATH_IQL} \
+#   --reward_scale ${R_SCALE} \
+#   --reward_bias ${R_BIAS} \
+#   --num_offline_steps ${num_offline_steps} \
+#   --num_online_steps ${num_online_steps} \
+#   --save_interval ${save_interval} \
+#   --exp_name iql_append \
+#   --save_dir ${SAVE_ROOT} \
+#   --online_sampling_method append
 
-echo "[GPU ${GPU_ID}] RLPD (SAC with offline data ratio=0.5) for ${ENV_ID}"
-python3 finetune.py \
-  --agent sac \
-  --config experiments/configs/train_config.py:kitchen_wsrl \
-  --env ${ENV_ID} \
-  --seed ${SEED} \
-  --num_offline_steps 0 \
-  --offline_data_ratio 0.5 \
-  --reward_scale ${R_SCALE} \
-  --reward_bias ${R_BIAS} \
-  --num_online_steps ${num_online_steps} \
-  --save_interval ${save_interval} \
-  --utd 4 \
-  --batch_size 1024 \
-  --warmup_steps 5000 \
-  --exp_name rlpd \
-  --save_dir ${SAVE_ROOT}
+# echo "[GPU ${GPU_ID}] RLPD (SAC with offline data ratio=0.5) for ${ENV_ID}"
+# python3 finetune.py \
+#   --agent sac \
+#   --config experiments/configs/train_config.py:kitchen_wsrl \
+#   --env ${ENV_ID} \
+#   --seed ${SEED} \
+#   --num_offline_steps 0 \
+#   --offline_data_ratio 0.5 \
+#   --reward_scale ${R_SCALE} \
+#   --reward_bias ${R_BIAS} \
+#   --num_online_steps ${num_online_steps} \
+#   --save_interval ${save_interval} \
+#   --utd 4 \
+#   --batch_size 1024 \
+#   --warmup_steps 5000 \
+#   --exp_name rlpd \
+#   --save_dir ${SAVE_ROOT}
 
-echo "[GPU ${GPU_ID}] FASTSAC (SAC with high utd) for ${ENV_ID}"
-python3 finetune.py \
-  --agent sac \
-  --config experiments/configs/train_config.py:kitchen_wsrl \
-  --env ${ENV_ID} \
-  --seed ${SEED} \
-  --num_offline_steps 0 \
-  --offline_data_ratio 0 \
-  --reward_scale ${R_SCALE} \
-  --reward_bias ${R_BIAS} \
-  --num_online_steps ${num_online_steps} \
-  --save_interval ${save_interval} \
-  --utd 4 \
-  --batch_size 1024 \
-  --exp_name fastsac \
-  --save_dir ${SAVE_ROOT}
+# echo "[GPU ${GPU_ID}] FASTSAC (SAC with high utd) for ${ENV_ID}"
+# python3 finetune.py \
+#   --agent sac \
+#   --config experiments/configs/train_config.py:kitchen_wsrl \
+#   --env ${ENV_ID} \
+#   --seed ${SEED} \
+#   --num_offline_steps 0 \
+#   --offline_data_ratio 0 \
+#   --reward_scale ${R_SCALE} \
+#   --reward_bias ${R_BIAS} \
+#   --num_online_steps ${num_online_steps} \
+#   --save_interval ${save_interval} \
+#   --utd 4 \
+#   --batch_size 1024 \
+#   --exp_name fastsac \
+#   --save_dir ${SAVE_ROOT}
 
-# AWAC: run non-append version first
-echo "[GPU ${GPU_ID}] AWAC pretrain for ${ENV_ID}"
-python3 finetune.py \
-  --agent awac \
-  --config experiments/configs/train_config.py:kitchen_awac \
-  --env ${ENV_ID} \
-  --seed ${SEED} \
-  --use_redq True \
-  --reward_scale ${R_SCALE} \
-  --reward_bias ${R_BIAS} \
-  --num_offline_steps ${num_offline_steps} \
-  --num_online_steps ${num_online_steps} \
-  --save_interval ${save_interval} \
-  --utd 4 \
-  --batch_size 1024 \
-  --exp_name awac \
-  --save_dir ${SAVE_ROOT}
+# # AWAC: run non-append version first
+# echo "[GPU ${GPU_ID}] AWAC pretrain for ${ENV_ID}"
+# python3 finetune.py \
+#   --agent awac \
+#   --config experiments/configs/train_config.py:kitchen_awac \
+#   --env ${ENV_ID} \
+#   --seed ${SEED} \
+#   --use_redq True \
+#   --reward_scale ${R_SCALE} \
+#   --reward_bias ${R_BIAS} \
+#   --num_offline_steps ${num_offline_steps} \
+#   --num_online_steps ${num_online_steps} \
+#   --save_interval ${save_interval} \
+#   --utd 4 \
+#   --batch_size 1024 \
+#   --exp_name awac \
+#   --save_dir ${SAVE_ROOT}
 
-# Get AWAC checkpoint path
+# Get AWAC checkpoint path (find directory that has the required checkpoint)
 EXP_DESC_AWAC="awac_${ENV_ID}_awac_seed${SEED}"
-RUN_DIR_AWAC=$(ls -1dt ${SAVE_ROOT}/${PROJECT_DIR}/${EXP_DESC_AWAC}_* | head -n 1)
+RUN_DIR_AWAC=""
+for dir in $(ls -1dt ${SAVE_ROOT}/${PROJECT_DIR}/${EXP_DESC_AWAC}_* 2>/dev/null); do
+  if [[ -d "${dir}/checkpoint_${num_offline_steps}" ]]; then
+    RUN_DIR_AWAC="$dir"
+    break
+  fi
+done
+if [[ -z "$RUN_DIR_AWAC" ]]; then
+  echo "[ERROR] No AWAC checkpoint found with ${num_offline_steps} steps for ${ENV_ID}"
+  exit 1
+fi
 CKPT_PATH_AWAC="${RUN_DIR_AWAC}/checkpoint_${num_offline_steps}"
 echo "[GPU ${GPU_ID}] Using AWAC checkpoint: ${CKPT_PATH_AWAC}"
 
@@ -197,9 +227,19 @@ python3 finetune.py \
   --exp_name calql_ensemble_highutd \
   --save_dir ${SAVE_ROOT}
 
-# Get CALQL checkpoint path
+# Get CALQL checkpoint path (find directory that has the required checkpoint)
 EXP_DESC="calql_ensemble_highutd_${ENV_ID}_calql_seed${SEED}"
-RUN_DIR=$(ls -1dt ${SAVE_ROOT}/${PROJECT_DIR}/${EXP_DESC}_* | head -n 1)
+RUN_DIR=""
+for dir in $(ls -1dt ${SAVE_ROOT}/${PROJECT_DIR}/${EXP_DESC}_* 2>/dev/null); do
+  if [[ -d "${dir}/checkpoint_${num_offline_steps}" ]]; then
+    RUN_DIR="$dir"
+    break
+  fi
+done
+if [[ -z "$RUN_DIR" ]]; then
+  echo "[ERROR] No CALQL checkpoint found with ${num_offline_steps} steps for ${ENV_ID}"
+  exit 1
+fi
 CKPT_PATH="${RUN_DIR}/checkpoint_${num_offline_steps}"
 echo "[GPU ${GPU_ID}] Using CALQL checkpoint: ${CKPT_PATH}"
 

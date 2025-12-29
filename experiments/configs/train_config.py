@@ -45,6 +45,16 @@ def get_config(config_string):
             dict(
                 agent_kwargs=get_iql_config(
                     updates=dict(
+                        critic_network_kwargs={
+                            "hidden_dims": [256, 256, 256, 256],
+                            "activations": "relu",
+                            "kernel_scale_final": 1e-2,
+                        },
+                        policy_network_kwargs={
+                            "hidden_dims": [256, 256],
+                            "activations": "relu",
+                            "kernel_scale_final": 1e-2,
+                        },
                         expectile=0.9,
                         temperature=10.0,
                     )
@@ -167,12 +177,16 @@ def get_config(config_string):
             dict(
                 agent_kwargs=get_iql_config(
                     updates=dict(
-                        policy_network_kwargs=dict(
-                            hidden_dims=(256, 256),
-                            kernel_init_type="var_scaling",
-                            kernel_scale_final=1e-2,
-                            dropout_rate=0.1,
-                        ),
+                        critic_network_kwargs={
+                            "hidden_dims": [512, 512, 512],
+                            "kernel_scale_final": 1e-2,
+                            "activations": "relu",
+                        },
+                        policy_network_kwargs={
+                            "hidden_dims": [512, 512],
+                            "kernel_scale_final": 1e-2,
+                            "activations": "relu",
+                        },
                         expectile=0.7,
                         temperature=0.5,
                     ),
@@ -292,15 +306,14 @@ def get_config(config_string):
             dict(
                 agent_kwargs=get_iql_config(
                     updates=dict(
-                        policy_network_kwargs=dict(
-                            hidden_dims=(256, 256),
-                            activations="relu",
-                            dropout_rate=0.1,
-                        ),
-                        critic_network_kwargs=dict(
-                            hidden_dims=(256, 256),
-                            activations="relu",
-                        ),
+                        critic_network_kwargs={
+                            "hidden_dims": [512, 512, 512],
+                            "activations": "relu",
+                        },
+                        policy_network_kwargs={
+                            "hidden_dims": [512, 512, 512],
+                            "activations": "relu",
+                        },
                         expectile=0.7,
                         temperature=0.5,
                     )
