@@ -24,45 +24,47 @@ num_offline_steps=1000000
 num_online_steps=300000
 save_interval=100000000
 
-# CQL: run non-append version first
-echo "[GPU ${GPU_ID}] CQL pretrain for ${ENV_ID}"
+# CALQL: run offline pretrain first (this will be used as the base for all finetuning methods)
+echo "[GPU ${GPU_ID}] CALQL (REDQ10, UTD=4) pretrain for ${ENV_ID}"
 python3 finetune.py \
-  --agent cql \
+  --agent calql \
   --config experiments/configs/train_config.py:antmaze_cql \
   --env ${ENV_ID} \
   --seed ${SEED} \
+  --use_redq True \
+  --utd 4 \
   --reward_scale ${R_SCALE} \
   --reward_bias ${R_BIAS} \
   --num_offline_steps ${num_offline_steps} \
   --num_online_steps ${num_online_steps} \
   --save_interval ${save_interval} \
-  --exp_name cql \
+  --exp_name calql_ensemble_highutd \
   --save_dir ${SAVE_ROOT}
 
-# Get CQL checkpoint path (find directory that has the required checkpoint)
-EXP_DESC_CQL="cql_${ENV_ID}_cql_seed${SEED}"
-RUN_DIR_CQL=""
-for dir in $(ls -1dt ${SAVE_ROOT}/${PROJECT_DIR}/${EXP_DESC_CQL}_* 2>/dev/null); do
+# Get CALQL checkpoint path (find directory that has the required checkpoint)
+EXP_DESC="calql_ensemble_highutd_${ENV_ID}_calql_seed${SEED}"
+RUN_DIR=""
+for dir in $(ls -1dt ${SAVE_ROOT}/${PROJECT_DIR}/${EXP_DESC}_* 2>/dev/null); do
   if [[ -d "${dir}/checkpoint_${num_offline_steps}" ]]; then
-    RUN_DIR_CQL="$dir"
+    RUN_DIR="$dir"
     break
   fi
 done
-if [[ -z "$RUN_DIR_CQL" ]]; then
-  echo "[ERROR] No CQL checkpoint found with ${num_offline_steps} steps for ${ENV_ID}"
+if [[ -z "$RUN_DIR" ]]; then
+  echo "[ERROR] No CALQL checkpoint found with ${num_offline_steps} steps for ${ENV_ID}"
   exit 1
 fi
-CKPT_PATH_CQL="${RUN_DIR_CQL}/checkpoint_${num_offline_steps}"
-echo "[GPU ${GPU_ID}] Using CQL checkpoint: ${CKPT_PATH_CQL}"
+CKPT_PATH="${RUN_DIR}/checkpoint_${num_offline_steps}"
+echo "[GPU ${GPU_ID}] Using CALQL checkpoint: ${CKPT_PATH}"
 
-# CQL append: load CQL offline checkpoint
+# CQL append: load CALQL offline checkpoint
 echo "[GPU ${GPU_ID}] CQL append for ${ENV_ID}"
 python3 finetune.py \
   --agent cql \
   --config experiments/configs/train_config.py:antmaze_cql \
   --env ${ENV_ID} \
   --seed ${SEED} \
-  --resume_path ${CKPT_PATH_CQL} \
+  --resume_path ${CKPT_PATH} \
   --reward_scale ${R_SCALE} \
   --reward_bias ${R_BIAS} \
   --num_offline_steps ${num_offline_steps} \
@@ -72,45 +74,14 @@ python3 finetune.py \
   --save_dir ${SAVE_ROOT} \
   --online_sampling_method append
 
-# IQL: run non-append version first
-echo "[GPU ${GPU_ID}] IQL pretrain for ${ENV_ID}"
-python3 finetune.py \
-  --agent iql \
-  --config experiments/configs/train_config.py:antmaze_iql \
-  --env ${ENV_ID} \
-  --seed ${SEED} \
-  --reward_scale ${R_SCALE} \
-  --reward_bias ${R_BIAS} \
-  --num_offline_steps ${num_offline_steps} \
-  --num_online_steps ${num_online_steps} \
-  --save_interval ${save_interval} \
-  --exp_name iql \
-  --save_dir ${SAVE_ROOT}
-
-# Get IQL checkpoint path (find directory that has the required checkpoint)
-EXP_DESC_IQL="iql_${ENV_ID}_iql_seed${SEED}"
-RUN_DIR_IQL=""
-for dir in $(ls -1dt ${SAVE_ROOT}/${PROJECT_DIR}/${EXP_DESC_IQL}_* 2>/dev/null); do
-  if [[ -d "${dir}/checkpoint_${num_offline_steps}" ]]; then
-    RUN_DIR_IQL="$dir"
-    break
-  fi
-done
-if [[ -z "$RUN_DIR_IQL" ]]; then
-  echo "[ERROR] No IQL checkpoint found with ${num_offline_steps} steps for ${ENV_ID}"
-  exit 1
-fi
-CKPT_PATH_IQL="${RUN_DIR_IQL}/checkpoint_${num_offline_steps}"
-echo "[GPU ${GPU_ID}] Using IQL checkpoint: ${CKPT_PATH_IQL}"
-
-# IQL append: load IQL offline checkpoint
+# IQL append: load CALQL offline checkpoint
 echo "[GPU ${GPU_ID}] IQL append for ${ENV_ID}"
 python3 finetune.py \
   --agent iql \
   --config experiments/configs/train_config.py:antmaze_iql \
   --env ${ENV_ID} \
   --seed ${SEED} \
-  --resume_path ${CKPT_PATH_IQL} \
+  --resume_path ${CKPT_PATH} \
   --reward_scale ${R_SCALE} \
   --reward_bias ${R_BIAS} \
   --num_offline_steps ${num_offline_steps} \
@@ -154,48 +125,14 @@ python3 finetune.py \
   --exp_name fastsac \
   --save_dir ${SAVE_ROOT}
 
-# AWAC: run non-append version first
-echo "[GPU ${GPU_ID}] AWAC pretrain for ${ENV_ID}"
-python3 finetune.py \
-  --agent awac \
-  --config experiments/configs/train_config.py:antmaze_awac \
-  --env ${ENV_ID} \
-  --seed ${SEED} \
-  --use_redq True \
-  --reward_scale ${R_SCALE} \
-  --reward_bias ${R_BIAS} \
-  --num_offline_steps ${num_offline_steps} \
-  --num_online_steps ${num_online_steps} \
-  --save_interval ${save_interval} \
-  --utd 4 \
-  --batch_size 1024 \
-  --exp_name awac \
-  --save_dir ${SAVE_ROOT}
-
-# Get AWAC checkpoint path (find directory that has the required checkpoint)
-EXP_DESC_AWAC="awac_${ENV_ID}_awac_seed${SEED}"
-RUN_DIR_AWAC=""
-for dir in $(ls -1dt ${SAVE_ROOT}/${PROJECT_DIR}/${EXP_DESC_AWAC}_* 2>/dev/null); do
-  if [[ -d "${dir}/checkpoint_${num_offline_steps}" ]]; then
-    RUN_DIR_AWAC="$dir"
-    break
-  fi
-done
-if [[ -z "$RUN_DIR_AWAC" ]]; then
-  echo "[ERROR] No AWAC checkpoint found with ${num_offline_steps} steps for ${ENV_ID}"
-  exit 1
-fi
-CKPT_PATH_AWAC="${RUN_DIR_AWAC}/checkpoint_${num_offline_steps}"
-echo "[GPU ${GPU_ID}] Using AWAC checkpoint: ${CKPT_PATH_AWAC}"
-
-# AWAC append: load AWAC offline checkpoint
+# AWAC append: load CALQL offline checkpoint
 echo "[GPU ${GPU_ID}] AWAC append for ${ENV_ID}"
 python3 finetune.py \
   --agent awac \
   --config experiments/configs/train_config.py:antmaze_awac \
   --env ${ENV_ID} \
   --seed ${SEED} \
-  --resume_path ${CKPT_PATH_AWAC} \
+  --resume_path ${CKPT_PATH} \
   --use_redq True \
   --reward_scale ${R_SCALE} \
   --reward_bias ${R_BIAS} \
@@ -207,39 +144,6 @@ python3 finetune.py \
   --online_sampling_method append \
   --exp_name awac_append \
   --save_dir ${SAVE_ROOT}
-
-# CALQL: run non-append version first
-echo "[GPU ${GPU_ID}] CALQL (REDQ10, UTD=4) pretrain for ${ENV_ID}"
-python3 finetune.py \
-  --agent calql \
-  --config experiments/configs/train_config.py:antmaze_cql \
-  --env ${ENV_ID} \
-  --seed ${SEED} \
-  --use_redq True \
-  --utd 4 \
-  --reward_scale ${R_SCALE} \
-  --reward_bias ${R_BIAS} \
-  --num_offline_steps ${num_offline_steps} \
-  --num_online_steps ${num_online_steps} \
-  --save_interval ${save_interval} \
-  --exp_name calql_ensemble_highutd \
-  --save_dir ${SAVE_ROOT}
-
-# Get CALQL checkpoint path (find directory that has the required checkpoint)
-EXP_DESC="calql_ensemble_highutd_${ENV_ID}_calql_seed${SEED}"
-RUN_DIR=""
-for dir in $(ls -1dt ${SAVE_ROOT}/${PROJECT_DIR}/${EXP_DESC}_* 2>/dev/null); do
-  if [[ -d "${dir}/checkpoint_${num_offline_steps}" ]]; then
-    RUN_DIR="$dir"
-    break
-  fi
-done
-if [[ -z "$RUN_DIR" ]]; then
-  echo "[ERROR] No CALQL checkpoint found with ${num_offline_steps} steps for ${ENV_ID}"
-  exit 1
-fi
-CKPT_PATH="${RUN_DIR}/checkpoint_${num_offline_steps}"
-echo "[GPU ${GPU_ID}] Using CALQL checkpoint: ${CKPT_PATH}"
 
 # CALQL append: load CALQL offline checkpoint
 echo "[GPU ${GPU_ID}] CALQL-APPEND (REDQ10, UTD=4) for ${ENV_ID}"
