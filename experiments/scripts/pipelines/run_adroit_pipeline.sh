@@ -13,7 +13,7 @@ GPU_ID=${1:-0}
 export CUDA_VISIBLE_DEVICES=${GPU_ID}
 
 # door-binary-v0, pen-binary-v0, relocate-binary-v0
-ENV_ID="relocate-binary-v0"
+ENV_ID="pen-binary-v0"
 SEED=0
 PROJECT_DIR="wsrl"
 
@@ -22,7 +22,7 @@ R_SCALE=10.0
 R_BIAS=5.0
 
 # Paper settings: 300k offline + 300k online for Adroit
-num_offline_steps=300000
+num_offline_steps=500000
 num_online_steps=300000
 save_interval=10000000
 
@@ -31,7 +31,7 @@ save_interval=10000000
 # Paper uses 2 Q-functions (default) for IQL/CQL/CalQL
 # ============================================================================
 
-# IQL pretrain (2 Q-functions, default UTD)
+IQL pretrain (2 Q-functions, default UTD)
 echo "[GPU ${GPU_ID}] IQL pretrain for ${ENV_ID}"
 python3 finetune.py \
   --agent iql \

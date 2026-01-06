@@ -22,7 +22,7 @@ R_SCALE=10.0
 R_BIAS=-5.0
 
 # Paper settings: 1M offline + 300k online for Antmaze
-num_offline_steps=500000
+num_offline_steps=1000000
 num_online_steps=300000
 save_interval=100000000
 
