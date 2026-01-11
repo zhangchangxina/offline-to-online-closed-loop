@@ -13,7 +13,7 @@ GPU_ID=${1:-0}
 export CUDA_VISIBLE_DEVICES=${GPU_ID}
 
 # door-binary-v0, pen-binary-v0, relocate-binary-v0
-ENV_ID="pen-binary-v0"
+ENV_ID="pen-expert-v0"
 SEED=0
 PROJECT_DIR="wsrl"
 
@@ -31,7 +31,7 @@ save_interval=10000000
 # Paper uses 2 Q-functions (default) for IQL/CQL/CalQL
 # ============================================================================
 
-IQL pretrain (2 Q-functions, default UTD)
+# IQL pretrain (2 Q-functions, default UTD)
 echo "[GPU ${GPU_ID}] IQL pretrain for ${ENV_ID}"
 python3 finetune.py \
   --agent iql \
@@ -314,7 +314,7 @@ python3 finetune.py \
   --use_redq True \
   --reward_scale ${R_SCALE} \
   --reward_bias ${R_BIAS} \
-  --resume_path ${CKPT_PATH_CALQL_REDQ} \
+  --resume_path ${CKPT_PATH_IQL} \
   --num_offline_steps ${num_offline_steps} \
   --num_online_steps ${num_online_steps} \
   --save_interval ${save_interval} \
@@ -337,7 +337,7 @@ python3 finetune.py \
   --use_redq True \
   --reward_scale ${R_SCALE} \
   --reward_bias ${R_BIAS} \
-  --resume_path ${CKPT_PATH_CALQL_REDQ} \
+  --resume_path ${CKPT_PATH_IQL} \
   --num_offline_steps ${num_offline_steps} \
   --num_online_steps ${num_online_steps} \
   --save_interval ${save_interval} \
@@ -372,7 +372,7 @@ python3 finetune.py \
   --use_redq True \
   --reward_scale ${R_SCALE} \
   --reward_bias ${R_BIAS} \
-  --resume_path ${CKPT_PATH_CALQL_REDQ} \
+  --resume_path ${CKPT_PATH_IQL} \
   --num_offline_steps ${num_offline_steps} \
   --num_online_steps ${num_online_steps} \
   --save_interval ${save_interval} \
@@ -407,7 +407,7 @@ python3 finetune.py \
   --use_redq True \
   --reward_scale ${R_SCALE} \
   --reward_bias ${R_BIAS} \
-  --resume_path ${CKPT_PATH_CALQL_REDQ} \
+  --resume_path ${CKPT_PATH_IQL} \
   --num_offline_steps ${num_offline_steps} \
   --num_online_steps ${num_online_steps} \
   --save_interval ${save_interval} \

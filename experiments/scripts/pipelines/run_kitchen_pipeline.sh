@@ -13,7 +13,7 @@ GPU_ID=${1:-0}
 export CUDA_VISIBLE_DEVICES=${GPU_ID}
 
 # kitchen-complete-v0 kitchen-partial-v0 kitchen-mixed-v0
-ENV_ID="kitchen-partial-v0"
+ENV_ID="kitchen-mixed-v0"
 SEED=0
 PROJECT_DIR="wsrl"
 
@@ -190,10 +190,10 @@ fi
 CKPT_PATH_CALQL_REDQ="${RUN_DIR_CALQL_REDQ}/checkpoint_${num_offline_steps}"
 echo "[GPU ${GPU_ID}] Using CalQL REDQ checkpoint: ${CKPT_PATH_CALQL_REDQ}"
 
-# ============================================================================
-# No-retention fine-tuning (resume from checkpoint, no offline data)
-# Paper: This is the key comparison - fine-tuning without retaining offline data
-# ============================================================================
+# # ============================================================================
+# # No-retention fine-tuning (resume from checkpoint, no offline data)
+# # Paper: This is the key comparison - fine-tuning without retaining offline data
+# # ============================================================================
 
 # IQL no retention
 echo "[GPU ${GPU_ID}] IQL no retention for ${ENV_ID}"

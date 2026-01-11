@@ -465,8 +465,9 @@ def main(_):
                         wandb_logger.log({"baseline": {"offline_success": baseline_success}}, step=step)
                         agent.update_config({"perf_baseline": baseline_success})
                     else:
-                        baseline_return_offline = float(np.mean([np.sum(t["rewards"]) for t in trajs]))
-                        wandb_logger.log({"baseline": {"offline_average_return": baseline_return_offline}}, step=step)
+                        # Use normalized return as baseline for "return" and "ewma" perf_source
+                        baseline_return_normalized = float(np.mean([eval_env.get_normalized_score(np.sum(t["rewards"])) for t in trajs]))
+                        wandb_logger.log({"baseline": {"offline_normalized_return": baseline_return_normalized}}, step=step)
                         # Log offline success rate as well, for convenience
                         if env_type == "adroit-binary":
                             offline_success = float(np.mean([any(d.get("goal_achieved", False) for d in t["infos"]) for t in trajs]))
@@ -477,7 +478,7 @@ def main(_):
                         wandb_logger.log({"baseline": {"offline_success": offline_success}}, step=step)
                         # Provide baseline to agent for internal J_drop when a Lagrangian schedule is active with j_drop
                         agent.update_config({
-                            "perf_baseline": baseline_return_offline,
+                            "perf_baseline": baseline_return_normalized,
                         })
                 except Exception as e:
                     logging.warning("Baseline evaluation failed at online switch: %s", repr(e))
@@ -534,6 +535,15 @@ def main(_):
                     # In kitchen, success is whether bonus at final step is True; track latest
                     bonus = 1.0 if info.get("rewards", {}).get("bonus", 0.0) else 0.0
                     episode_success = bonus
+                elif env_type == "antmaze":
+                    # antmaze: sparse reward, success = reaching goal (reward > 0 after scaling)
+                    # info may contain "success" key in newer versions; fallback to reward check
+                    if info.get("success", False):
+                        episode_success = 1.0
+                    elif reward > 0:  # scaled reward > 0 means original reward was positive
+                        episode_success = 1.0
+                    else:
+                        episode_success = episode_success if episode_success is not None else 0.0
                 if done or truncated:
                     # Ensure episode_success is set for adroit environments
                     if env_type in ("adroit", "adroit-binary") and episode_success is None:
@@ -570,9 +580,10 @@ def main(_):
                             perf_online = float(np.mean(success_window)) if len(success_window) > 0 else None
                             online_log["success_window_len"] = len(success_window)
                         elif perf_source == "ewma":
-                            perf_online = float(ewma_online_return) if ewma_online_return is not None else None
-                        else:  # "return": use current episode return (no window)
-                            perf_online = float(episode_return)
+                            # Use normalized EWMA return
+                            perf_online = float(eval_env.get_normalized_score(ewma_online_return)) if ewma_online_return is not None else None
+                        else:  # "return": use normalized current episode return
+                            perf_online = float(eval_env.get_normalized_score(episode_return))
                         online_log["perf_online_debug"] = perf_online
                         bc_schedule = FLAGS.config.agent_kwargs.get("bc_lambda_schedule", "fixed")
                         if (
